@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Latch",
+  "version": "1.0.0",
+  "description": "Let any local coding agent drive your signed-in Chrome. Each agent gets its own named tab group.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx8lyWY+goBgOOj1gEQ2A174RXmOVtsGbMELbuTO4UyePAnGu17cU/1poMrZxlQc5a81ifbsPk9miZrCQXGtL6YOhminWCO2WfTQQexcL3eXaXdkrjRkGtC5fEouUD0lUBNOkN6mAixdh4/nIXOW7E+Dq6TKmbgs2FWkQeZ8Q/+Ut/7Mn74XMVVDk60XciOOrmXr841CEApvvxkAJldjdB9W4NRSvST4qsnwytpCYGDK2kHXtSLtIzcF+8uZPtPI1e6Q1dpoaLYbnbAanXu8uPV3ozgaYudVzBwaQZPORJNaK7DmBxZTeBhJ024EOGFKJ3YXqsTZOOCHHU5YqURWL5wIDAQAB",
+  "permissions": [
+    "debugger",
+    "nativeMessaging",
+    "storage",
+    "tabGroups",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Latch",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -1,0 +1,47 @@
+:root {
+  --bg: #ffffff; --fg: #16181d; --muted: #6b7280;
+  --line: #e6e8ec; --ok: #16a34a; --off: #9ca3af; --err: #dc2626;
+  --chip: #f3f4f6; --accent: #4f46e5;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #17191d; --fg: #f3f4f6; --muted: #9ca3af;
+    --line: #2a2d33; --chip: #23262c;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  width: 300px; margin: 0; padding: 12px;
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  background: var(--bg); color: var(--fg);
+}
+header { display: flex; align-items: center; gap: 8px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); flex: none; }
+.dot.on { background: var(--ok); }
+header strong { font-size: 13px; font-weight: 600; }
+.count { margin-left: auto; color: var(--muted); font-size: 12px; }
+
+.agents { display: flex; flex-direction: column; gap: 4px; padding: 10px 0; }
+.agents:empty { display: none; }
+.agent { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; background: var(--accent); }
+.agent .n { margin-left: auto; color: var(--muted); }
+
+.tab { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
+.tab-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; }
+.tab-copy strong { font-size: 12px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-copy span { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+button {
+  font: inherit; font-size: 12px; padding: 5px 10px; border-radius: 6px;
+  border: 1px solid var(--line); background: var(--chip); color: var(--fg); cursor: pointer; flex: none;
+}
+button:hover:not(:disabled) { border-color: var(--muted); }
+button:disabled { opacity: .45; cursor: default; }
+
+.offline { border-top: 1px solid var(--line); padding-top: 10px; }
+.offline p { margin: 0 0 6px; font-size: 12px; color: var(--muted); }
+.offline code { display: block; font-size: 10px; color: var(--muted); word-break: break-all; margin-bottom: 6px; }
+.hidden { display: none; }
+.error { margin: 8px 0 0; font-size: 12px; color: var(--err); min-height: 0; }
+.error:empty { display: none; }

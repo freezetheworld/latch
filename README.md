@@ -1,0 +1,275 @@
+<div align="center">
+
+<img src="assets/logo.png" alt="Latch" width="96" height="96">
+
+# Latch
+
+**Latch onto your real Chrome. Every agent gets its own tab group.**
+
+Latch lets any local coding agent drive the Chrome you are already signed into — your sessions,
+your cookies, your logged-in tabs. Several agents can work in that one profile at the same time
+without stepping on each other, because each one's tabs are grouped and labelled with its name.
+
+[![License: MIT](https://img.shields.io/badge/license-MIT-16a34a.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A520-16a34a.svg)](https://nodejs.org)
+[![Chrome MV3](https://img.shields.io/badge/chrome-MV3-16a34a.svg)](https://developer.chrome.com/docs/extensions/mv3/intro/)
+[![MCP](https://img.shields.io/badge/protocol-MCP-16a34a.svg)](https://modelcontextprotocol.io)
+
+</div>
+
+---
+
+## Why Latch
+
+Most browser automation hands your agent a fresh, empty, logged-out browser. That is useless for the
+things you actually want done — reading your analytics, checking a dashboard, finishing a form on a
+site you are signed into.
+
+Latch takes the opposite approach: **no new browser, no new profile, no re-authentication.** It
+attaches to the Chrome window in front of you.
+
+The problem with sharing one real browser is that agents collide. Latch solves that with Chrome tab
+groups: every request carries the name of the agent that made it, and that name becomes the title of
+a coloured tab group. Claude Code's tabs sit in a purple **Claude Code** group. Codex's sit in a cyan
+**Codex** group. Yours stay where you left them, untouched.
+
+```text
+any agent (MCP or latch CLI) ──▶ Unix socket ──▶ native host ◀──▶ Chrome extension
+```
+
+Everything is local. No cloud service, no remote browser, no account.
+
+## Features
+
+- **Runs in your signed-in Chrome** — real sessions, real cookies, no login dance.
+- **One tab group per agent, per window**, titled with the agent's name and given a stable colour.
+- **Strict ownership** — an agent only ever reuses or adopts its *own* tabs, never another agent's
+  and never your personal groups.
+- **Reuse before opening** — `browser_open` finds a matching tab before creating a new one, so your
+  window does not fill up with duplicates.
+- **Background-first** — task tabs never steal focus unless the agent is explicitly asked to show you.
+- **A visible cursor** on the page, labelled with the acting agent's name, so you can see what is
+  happening and who is doing it.
+- **Works with anything that speaks MCP** — Claude Code, Codex, Gemini, Cursor — plus a plain CLI for
+  agents and shells that do not.
+- **A small toolbar popup**: connection status, attached tab count, per-agent tab counts, attach and
+  detach. That is the whole UI.
+
+## Requirements
+
+- macOS or Linux
+- Node.js 20 or newer
+- Google Chrome, Chrome Beta, or Chromium
+- At least one local agent (anything that speaks MCP, or any shell)
+
+## Install
+
+**1. Clone and install dependencies**
+
+```bash
+git clone https://github.com/freezetheworld/latch.git
+cd latch
+npm install
+```
+
+**2. Load the extension**
+
+1. Open `chrome://extensions`
+2. Enable **Developer mode**
+3. Select **Load unpacked**
+4. Choose this project's `extension/` directory
+
+The bundled manifest key pins a stable extension ID, so the installer below needs no arguments:
+`negoahcokogjggjcccibffdnognlfbkm`
+
+**3. Install the native host**
+
+```bash
+npm run install-host
+```
+
+This writes a native-messaging manifest into Chrome's user-level config and stages the host runtime
+under `~/.latch/runtime`. No administrator privileges are needed. **Restart Chrome afterwards.**
+
+For other browsers pass `--browser chrome-beta` or `--browser chromium`. If you removed the manifest
+key or repackaged the extension, pass `--extension-id YOUR_ID`.
+
+> **macOS note:** the runtime is staged outside your checkout on purpose. Chrome's sandbox cannot
+> launch a host that lives in a privacy-protected folder such as `Documents` or `Desktop`.
+
+**4. Register the MCP server with your agents**
+
+Use the absolute path the installer prints:
+
+```bash
+claude mcp add latch -- node /absolute/path/to/latch/server/mcp-server.js
+codex  mcp add latch -- node /absolute/path/to/latch/server/mcp-server.js
+gemini mcp add latch -- node /absolute/path/to/latch/server/mcp-server.js
+```
+
+Start a fresh session and run `/mcp` to confirm `latch` is active.
+
+**5. Check it**
+
+Click the Latch toolbar icon. It should say **Connected**. Then ask your agent something like:
+
+```text
+Open my YouTube Studio tab, check my upload defaults, and tell me what is missing.
+```
+
+## Agents and tab groups
+
+Every request carries an agent name. That name titles the Chrome tab group holding the agent's tabs.
+
+Resolution order:
+
+1. an explicit `--agent NAME` flag (CLI) or `agent` parameter (MCP tool)
+2. the `LATCH_AGENT` environment variable
+3. auto-detection from the environment (`CLAUDECODE`, `CODEX_HOME`, `CURSOR_AGENT`, ...)
+4. the neutral fallback `Agent`
+
+```bash
+# two agents driving the same Chrome profile at once
+latch --agent "Claude Code" open https://example.com   # → purple "Claude Code" group
+latch --agent "Codex"       open https://example.org   # → cyan "Codex" group
+
+LATCH_AGENT="Research" latch open https://example.net
+```
+
+Known agents keep a fixed colour — Claude Code purple, Codex cyan, Gemini blue, Cursor orange,
+DeepSeek green, Hermes yellow. Any other name hashes deterministically into Chrome's palette, so the
+same agent always lands on the same colour.
+
+**Isolation rules**
+
+- An agent only reuses or adopts tabs belonging to itself.
+- A tab opened by an agent's tab joins that same agent's group.
+- Only groups titled after an agent seen this session are adopted, so your own groups
+  (`Work`, `Reading`, ...) are never taken over.
+
+## MCP tools
+
+| Tool | Purpose |
+| --- | --- |
+| `browser_status` | Check the bridge and tab attachments |
+| `browser_tabs` | List Chrome tabs |
+| `browser_attach` / `browser_detach` | Start or stop controlling a tab |
+| `browser_snapshot` | Read visible text and interactive element refs |
+| `browser_navigate` | Navigate to a URL |
+| `browser_click` / `browser_type` / `browser_press_key` | Act on page controls |
+| `browser_wait_for` | Wait for a selector or text |
+| `browser_screenshot` | Capture the viewport or full page |
+| `browser_console` | Read console messages and JavaScript errors |
+| `browser_network` | Read recent requests and response status |
+| `browser_evaluate` | Run JavaScript in an attached tab |
+| `browser_open` | Reuse a matching own tab before creating one |
+| `browser_new_tab` / `browser_close_tab` | Force a separate tab, or close an attached one |
+
+Every tool accepts an optional `agent` parameter.
+
+## CLI
+
+For agents and shells that do not speak MCP:
+
+```bash
+node cli/latch.js --help
+node cli/latch.js --agent "My Agent" status
+node cli/latch.js --agent "My Agent" open https://example.com
+node cli/latch.js --agent "My Agent" snapshot
+```
+
+Link it onto your `PATH` if you want the bare `latch` command:
+
+```bash
+ln -s "$PWD/cli/latch.js" /usr/local/bin/latch
+```
+
+## Agent skill
+
+`skills/latch/SKILL.md` teaches an agent the house rules: check tabs before opening, reuse before
+creating, stay in the background, never touch another agent's group, and stop before consequential
+clicks. Symlink it into your agent's skills directory:
+
+```bash
+ln -s "$PWD/skills/latch" ~/.claude/skills/latch
+ln -s "$PWD/skills/latch" ~/.codex/skills/latch
+```
+
+## Codex plugin
+
+This repository doubles as a Codex plugin. The manifest is `.codex-plugin/plugin.json` and its MCP
+definition is `.mcp.json`. Other agents use the MCP server directly; the plugin wrapper is
+Codex-specific.
+
+## Security model
+
+Browser automation is powerful, and page content can carry prompt injection. Latch draws hard
+boundaries:
+
+- The native host listens on a **user-only Unix socket** (`0700` directory, `0600` socket).
+- Chrome accepts native messages only from the **exact extension ID** supplied at install.
+- Control is scoped to tabs **explicitly attached** through the popup or `browser_attach`.
+- Chrome internal pages and extension pages are **rejected**.
+- Password input values are **masked** in page snapshots.
+- Nothing leaves your machine. There is no server, no telemetry, no account.
+
+Latch does **not** use macOS Screen Recording, Accessibility, AppleScript, or desktop mouse and
+keyboard automation. Screenshots come from the attached tab through the Chrome DevTools Protocol.
+
+Attached tabs may navigate across origins without extra prompts. Use a separate Chrome profile for
+automation when practical, and do not attach banking, password-manager, or admin tabs unless the task
+truly needs it and you are watching.
+
+## Development
+
+```bash
+npm run verify   # syntax + JSON checks, then the test suite
+npm test
+```
+
+The suite covers native-message framing, the JSON line protocol, native-host manifest generation,
+runtime staging, agent-name resolution and colouring, the full local bridge end to end, and the MCP
+tool interface.
+
+```text
+extension/   MV3 service worker, toolbar popup, icons
+server/      native host, MCP server, agent identity, socket paths
+cli/         latch command-line client
+scripts/     installer and checks
+skills/      agent skill definition
+tests/       node:test suites
+```
+
+## Uninstall
+
+```bash
+npm run uninstall-host
+```
+
+Then remove the unpacked extension at `chrome://extensions` and drop the MCP entry:
+
+```bash
+claude mcp remove latch   # and the equivalent for your other agents
+```
+
+## Troubleshooting
+
+**Popup says Offline** — confirm the extension ID shown in the popup matches the one passed to
+`install-host`, then fully quit and reopen Chrome.
+
+**"Another debugger is attached"** — close DevTools for that tab and disable other automation
+extensions.
+
+**MCP server unavailable** — run your agent's `mcp list`, restart the session, and confirm the
+absolute path to `server/mcp-server.js` still exists.
+
+**Nothing happens on a page** — the tab must be attached. Click the Latch icon and press **Attach**,
+or have the agent call `browser_attach`.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `npm run verify` before opening a PR.
+
+## License
+
+[MIT](LICENSE)

@@ -1,0 +1,47 @@
+{
+  "name": "latch",
+  "version": "1.0.0",
+  "description": "Latch onto any signed-in Chrome tab. Any local agent can drive Chrome, each in its own named tab group.",
+  "license": "MIT",
+  "author": "freezetheworld",
+  "homepage": "https://github.com/freezetheworld/latch#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/freezetheworld/latch.git"
+  },
+  "bugs": {
+    "url": "https://github.com/freezetheworld/latch/issues"
+  },
+  "keywords": [
+    "chrome",
+    "browser-automation",
+    "mcp",
+    "model-context-protocol",
+    "agent",
+    "native-messaging",
+    "chrome-extension",
+    "tab-groups",
+    "claude-code",
+    "codex"
+  ],
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check.js",
+    "install-host": "node scripts/install-native-host.js",
+    "uninstall-host": "node scripts/install-native-host.js --uninstall",
+    "mcp": "node server/mcp-server.js",
+    "test": "node --test",
+    "verify": "npm run check && npm test",
+    "latch": "node cli/latch.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "bin": {
+    "latch": "./cli/latch.js"
+  }
+}

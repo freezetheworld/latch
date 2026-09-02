@@ -1,0 +1,28 @@
+{
+  "name": "latch",
+  "version": "1.0.0",
+  "description": "Control the user's signed-in Chrome tabs through the local Latch extension, with tab reuse, per-agent tab groups, and visible browser actions.",
+  "author": {
+    "name": "freezetheworld"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Latch",
+    "shortDescription": "Control signed-in Chrome tabs, with a tab group per agent.",
+    "longDescription": "Latch connects any local agent to your real Chrome session. It reuses existing pages, groups each agent's task tabs under a group named after that agent, and exposes navigation, page actions, screenshots, console, and network activity.",
+    "developerName": "freezetheworld",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Continue in the tab I already have open",
+      "Inspect this page and help me finish the task",
+      "Research this across a grouped set of tabs"
+    ],
+    "brandColor": "#16A34A"
+  },
+  "mcpServers": "./.mcp.json"
+}

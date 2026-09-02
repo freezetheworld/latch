@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "latch": {
+      "command": "node",
+      "args": ["./server/mcp-server.js"],
+      "cwd": "."
+    }
+  }
+}

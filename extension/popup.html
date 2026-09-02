@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Latch</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <span id="dot" class="dot"></span>
+      <strong id="status">Connecting…</strong>
+      <span id="count" class="count"></span>
+    </header>
+
+    <section id="agents" class="agents"></section>
+
+    <section class="tab">
+      <div class="tab-copy">
+        <strong id="tab-title">No active tab</strong>
+        <span id="tab-origin"></span>
+      </div>
+      <button id="action" type="button" disabled>Attach</button>
+    </section>
+
+    <section id="offline" class="offline hidden">
+      <p>Native host offline. Reinstall the bridge, then retry.</p>
+      <code id="ext-id"></code>
+      <button id="retry" type="button">Retry</button>
+    </section>
+
+    <p id="error" class="error"></p>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
