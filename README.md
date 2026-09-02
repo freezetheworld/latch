@@ -43,6 +43,8 @@ Everything is local. No cloud service, no remote browser, no account.
 
 - **Runs in your signed-in Chrome** — real sessions, real cookies, no login dance.
 - **One tab group per agent, per window**, titled with the agent's name and given a stable colour.
+- **Live status in the tab strip** — the group title reads `Codex · ⏳ Working`, then `Codex · ✅ Done`,
+  so you can see what each agent is doing without opening anything.
 - **Strict ownership** — an agent only ever reuses or adopts its *own* tabs, never another agent's
   and never your personal groups.
 - **Reuse before opening** — `browser_open` finds a matching tab before creating a new one, so your
@@ -52,8 +54,8 @@ Everything is local. No cloud service, no remote browser, no account.
   happening and who is doing it.
 - **Works with anything that speaks MCP** — Claude Code, Codex, Gemini, Cursor — plus a plain CLI for
   agents and shells that do not.
-- **A small toolbar popup**: connection status, attached tab count, per-agent tab counts, attach and
-  detach. That is the whole UI.
+- **A small toolbar popup**: connection status, attached tab count, per-agent tab counts and live
+  status, attach and detach. That is the whole UI.
 
 ## Requirements
 
@@ -139,6 +141,24 @@ LATCH_AGENT="Research" latch open https://example.net
 Known agents keep a fixed colour — Claude Code purple, Codex cyan, Gemini blue, Cursor orange,
 DeepSeek green, Hermes yellow. Any other name hashes deterministically into Chrome's palette, so the
 same agent always lands on the same colour.
+
+### Live status
+
+The group title is `<agent> · <emoji> <word>`, and the second half updates as the agent works:
+
+| | | |
+| --- | --- | --- |
+| ⏳ Working | 🧭 Navigating | 👁️ Reading |
+| 👆 Clicking | ⌨️ Typing | ⏱️ Waiting |
+| ✅ Done | ⚠️ Error | 🔗 Connected |
+| 💤 Idle | | |
+
+An agent switches to the status for whichever command it is running, then settles on **✅ Done** when
+that command succeeds, or **⚠️ Error** when it fails. `browser_status` and `browser_tabs` only read
+extension state, so they leave the title alone.
+
+The same emoji and word appear on the on-page cursor footer and in the toolbar popup, next to each
+agent's colour swatch.
 
 **Isolation rules**
 

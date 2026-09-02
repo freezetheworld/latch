@@ -25,7 +25,16 @@ header strong { font-size: 13px; font-weight: 600; }
 .agents:empty { display: none; }
 .agent { display: flex; align-items: center; gap: 6px; font-size: 12px; }
 .swatch { width: 8px; height: 8px; border-radius: 2px; flex: none; background: var(--accent); }
-.agent .n { margin-left: auto; color: var(--muted); }
+.agent .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent .n { margin-left: auto; color: var(--muted); flex: none; }
+
+/* Emoji + word, matching the agent's tab group title. */
+.status {
+  flex: none; font-size: 11px; line-height: 1.5; padding: 1px 6px;
+  border-radius: 999px; background: var(--chip); color: var(--muted); white-space: nowrap;
+}
+.status.s-done { color: var(--ok); }
+.status.s-error { color: var(--err); }
 
 .tab { display: flex; align-items: center; gap: 8px; padding: 10px 0; border-top: 1px solid var(--line); }
 .tab-copy { min-width: 0; flex: 1; display: flex; flex-direction: column; }

@@ -32,7 +32,7 @@ function send(type, payload = {}) {
 
 let current = null;
 
-function renderAgents(agents) {
+function renderAgents(agents, statuses = {}) {
   const box = el("agents");
   box.textContent = "";
   const names = Object.keys(agents || {});
@@ -43,12 +43,24 @@ function renderAgents(agents) {
     sw.className = "swatch";
     sw.style.background = colorForAgent(name);
     const label = document.createElement("span");
+    label.className = "name";
     label.textContent = name;
+    row.append(sw, label);
+
+    // The same emoji and word that the agent's Chrome tab group is titled with.
+    const status = statuses[name];
+    if (status) {
+      const chip = document.createElement("span");
+      chip.className = `status s-${status.status}`;
+      chip.textContent = `${status.glyph} ${status.word}`;
+      row.append(chip);
+    }
+
     const n = document.createElement("span");
     n.className = "n";
     const count = agents[name].length;
     n.textContent = count === 1 ? "1 tab" : `${count} tabs`;
-    row.append(sw, label, n);
+    row.append(n);
     box.append(row);
   }
 }
@@ -62,7 +74,7 @@ function render(state) {
   const total = (state.attachedTabIds || []).length;
   el("count").textContent = total ? (total === 1 ? "1 attached" : `${total} attached`) : "";
 
-  renderAgents(state.agents);
+  renderAgents(state.agents, state.statuses);
 
   const tab = state.currentTab;
   el("tab-title").textContent = tab ? tab.title || tab.url : "No active tab";

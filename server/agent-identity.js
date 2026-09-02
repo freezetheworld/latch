@@ -6,8 +6,9 @@
  * agent's tabs in, so several agents can drive the same Chrome profile at the
  * same time and stay visually separated.
  *
- * The pure helpers here (normalizeAgentName / colorForAgent) are mirrored in
- * extension/background.js, which cannot import from server/. Keep them in sync.
+ * The pure helpers here (normalizeAgentName / colorForAgent / the status and
+ * group-title helpers) are mirrored in extension/background.js, which cannot
+ * import from server/. Keep them in sync.
  */
 
 export const AGENT_ENV_VAR = "LATCH_AGENT";
@@ -68,4 +69,60 @@ export function colorForAgent(name) {
   let hash = 0;
   for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
   return GROUP_COLORS[hash % GROUP_COLORS.length];
+}
+
+// --- Agent status ---------------------------------------------------------
+// What an agent is doing right now, as an emoji plus one word. The pair is
+// appended to the agent's Chrome tab group title, so the tab strip reports live
+// progress, and is shown on the on-page cursor footer and in the popup.
+
+export const AGENT_STATUSES = {
+  idle: { glyph: "\u{1F4A4}", word: "Idle" },
+  connected: { glyph: "\u{1F517}", word: "Connected" },
+  working: { glyph: "\u23F3", word: "Working" },
+  navigating: { glyph: "\u{1F9ED}", word: "Navigating" },
+  reading: { glyph: "\u{1F441}\uFE0F", word: "Reading" },
+  clicking: { glyph: "\u{1F446}", word: "Clicking" },
+  typing: { glyph: "\u2328\uFE0F", word: "Typing" },
+  waiting: { glyph: "\u23F1\uFE0F", word: "Waiting" },
+  done: { glyph: "\u2705", word: "Done" },
+  error: { glyph: "\u26A0\uFE0F", word: "Error" },
+};
+
+/** Older, verb-shaped status names kept working for the on-page cursor. */
+export const STATUS_ALIASES = {
+  click: "clicking",
+  type: "typing",
+  key: "typing",
+  navigate: "navigating",
+  read: "reading",
+  wait: "waiting",
+};
+
+/** Anything unrecognized falls back to the generic busy state. */
+export function statusKey(status) {
+  const raw = String(status ?? "").toLowerCase();
+  const resolved = STATUS_ALIASES[raw] ?? raw;
+  return AGENT_STATUSES[resolved] ? resolved : "working";
+}
+
+export function statusInfo(status) {
+  return AGENT_STATUSES[statusKey(status)];
+}
+
+/** Separates the agent name from its status inside a tab group title. */
+export const STATUS_SEPARATOR = " \u00B7 ";
+
+/** The tab group title for an agent in a given status: "Codex \u00B7 \u23F3 Working". */
+export function groupTitleFor(agent, status) {
+  const info = statusInfo(status);
+  return `${agent}${STATUS_SEPARATOR}${info.glyph} ${info.word}`;
+}
+
+/** The agent named by a group title, with or without a status suffix. */
+export function agentFromGroupTitle(title) {
+  if (typeof title !== "string") return null;
+  const index = title.indexOf(STATUS_SEPARATOR);
+  const name = (index === -1 ? title : title.slice(0, index)).trim();
+  return name || null;
 }

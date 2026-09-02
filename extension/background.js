@@ -57,22 +57,65 @@ function accentRgbForAgent(name) {
   return GROUP_COLOR_RGB[colorForAgent(name)] ?? GROUP_COLOR_RGB.grey;
 }
 
-// What the agent is doing, as one glyph. `working` is the only sustained state;
-// the rest are momentary and settle back to it or to `done`.
-const STATUS_GLYPHS = {
-  working: "\u23F3",
-  done: "\u2705",
-  click: "\u{1F446}",
-  type: "\u2328\uFE0F",
-  key: "\u2328\uFE0F",
-  navigate: "\u{1F9ED}",
-  connected: "\u{1F517}",
-  reading: "\u{1F441}\uFE0F",
-  error: "\u26A0\uFE0F",
+// What an agent is doing right now, as an emoji plus one word. The pair is shown
+// in two places: appended to the agent's Chrome tab group title, so the tab strip
+// reports live progress, and on the on-page cursor badge.
+const AGENT_STATUSES = {
+  idle: { glyph: "\u{1F4A4}", word: "Idle" },
+  connected: { glyph: "\u{1F517}", word: "Connected" },
+  working: { glyph: "\u23F3", word: "Working" },
+  navigating: { glyph: "\u{1F9ED}", word: "Navigating" },
+  reading: { glyph: "\u{1F441}\uFE0F", word: "Reading" },
+  clicking: { glyph: "\u{1F446}", word: "Clicking" },
+  typing: { glyph: "\u2328\uFE0F", word: "Typing" },
+  waiting: { glyph: "\u23F1\uFE0F", word: "Waiting" },
+  done: { glyph: "\u2705", word: "Done" },
+  error: { glyph: "\u26A0\uFE0F", word: "Error" },
 };
 
-function glyphForStatus(status) {
-  return STATUS_GLYPHS[String(status ?? "").toLowerCase()] ?? STATUS_GLYPHS.working;
+// Older, verb-shaped names used by the on-page cursor call sites.
+const STATUS_ALIASES = {
+  click: "clicking",
+  type: "typing",
+  key: "typing",
+  navigate: "navigating",
+  read: "reading",
+  wait: "waiting",
+};
+
+function statusKey(status) {
+  const raw = String(status ?? "").toLowerCase();
+  const resolved = STATUS_ALIASES[raw] ?? raw;
+  return AGENT_STATUSES[resolved] ? resolved : "working";
+}
+
+function statusInfo(status) {
+  return AGENT_STATUSES[statusKey(status)];
+}
+
+// --- Tab group titles -----------------------------------------------------
+// A Latch group is titled "<agent> \u00B7 <emoji> <word>". The agent name is
+// always the part before the separator, so every place that used to compare a
+// group title to an agent name parses it back out instead.
+const STATUS_SEPARATOR = " \u00B7 ";
+
+function groupTitleFor(agent, status) {
+  const info = statusInfo(status);
+  return `${agent}${STATUS_SEPARATOR}${info.glyph} ${info.word}`;
+}
+
+/** The agent named by a group title, whether or not it carries a status suffix. */
+function agentFromGroupTitle(title) {
+  if (typeof title !== "string") return null;
+  const index = title.indexOf(STATUS_SEPARATOR);
+  const name = (index === -1 ? title : title.slice(0, index)).trim();
+  return name || null;
+}
+
+/** The agent named by a group title, but only if we have seen it this session. */
+function knownAgentFromGroupTitle(title) {
+  const agent = agentFromGroupTitle(title);
+  return agent && knownAgents.has(agent) ? agent : null;
 }
 
 const attachedTabs = new Set();
@@ -85,6 +128,8 @@ const tabAgents = new Map();
 // Agents seen this session. Only groups titled after one of these are adopted,
 // so the user's own tab groups are never hijacked.
 const knownAgents = new Set();
+// agent -> status key, the second half of that agent's tab group title.
+const agentStatuses = new Map();
 const cursorPositions = new Map();
 const requestedDetachReasons = new Map();
 const consoleMessages = new Map();
@@ -206,6 +251,48 @@ function rememberAgent(agent) {
   if (agent) knownAgents.add(agent);
 }
 
+function statusForAgent(agent) {
+  return agentStatuses.get(agent) ?? "idle";
+}
+
+/** Rewrite the title of every group this agent owns, in every window. */
+async function retitleAgentGroups(agent) {
+  const title = groupTitleFor(agent, statusForAgent(agent));
+  const suffix = `::${agent}`;
+  const updates = [];
+  for (const [key, groupId] of agentGroupsByKey.entries()) {
+    if (!key.endsWith(suffix)) continue;
+    updates.push(
+      chrome.tabGroups.update(groupId, { title }).catch(() => {
+        // The group was closed between the lookup and the update.
+        if (agentGroupsByKey.get(key) === groupId) agentGroupsByKey.delete(key);
+      }),
+    );
+  }
+  await Promise.allSettled(updates);
+}
+
+/** Move an agent to a new status and repaint its tab groups. */
+function setAgentStatus(agent, status) {
+  if (!agent) return;
+  const next = statusKey(status);
+  if (agentStatuses.get(agent) === next) return;
+  agentStatuses.set(agent, next);
+  void retitleAgentGroups(agent);
+  broadcastStateUpdate();
+}
+
+/** Every agent that owns a group or has a status, with its emoji and word. */
+function statusSummary() {
+  const summary = {};
+  for (const agent of new Set([...agentStatuses.keys(), ...tabAgents.values()])) {
+    const status = statusForAgent(agent);
+    const info = statusInfo(status);
+    summary[agent] = { status, glyph: info.glyph, word: info.word };
+  }
+  return summary;
+}
+
 function agentForGroupId(groupId) {
   if (typeof groupId !== "number" || groupId < 0) return null;
   for (const [key, id] of agentGroupsByKey.entries()) {
@@ -230,9 +317,10 @@ async function agentForTab(tab) {
   if (typeof tab.groupId === "number" && tab.groupId >= 0) {
     try {
       const group = await chrome.tabGroups.get(tab.groupId);
-      if (group.title && knownAgents.has(group.title)) {
-        tabAgents.set(tab.id, group.title);
-        return group.title;
+      const titled = knownAgentFromGroupTitle(group.title);
+      if (titled) {
+        tabAgents.set(tab.id, titled);
+        return titled;
       }
     } catch {
       // The group disappeared; the tab simply has no agent.
@@ -247,7 +335,7 @@ async function getAgentGroup(groupId, windowId, agent) {
   }
   try {
     const group = await chrome.tabGroups.get(groupId);
-    if (group.windowId === windowId && group.title === agent) {
+    if (group.windowId === windowId && agentFromGroupTitle(group.title) === agent) {
       return group;
     }
   } catch {
@@ -266,8 +354,9 @@ async function placeTabInAgentGroup(tabId, agent) {
   }
 
   if (!group) {
-    const groups = await chrome.tabGroups.query({ windowId: tab.windowId, title: agent });
-    group = groups[0] ?? null;
+    // Titles carry a status suffix, so an exact title query cannot be used.
+    const groups = await chrome.tabGroups.query({ windowId: tab.windowId });
+    group = groups.find((candidate) => agentFromGroupTitle(candidate.title) === agent) ?? null;
   }
 
   const groupId = group
@@ -275,7 +364,7 @@ async function placeTabInAgentGroup(tabId, agent) {
     : await chrome.tabs.group({ tabIds: [tabId] });
 
   await chrome.tabGroups.update(groupId, {
-    title: agent,
+    title: groupTitleFor(agent, statusForAgent(agent)),
     color: colorForAgent(agent),
     collapsed: false,
   });
@@ -411,6 +500,7 @@ async function attachTab(requestedTabId, agent = DEFAULT_AGENT_NAME) {
     return existing;
   }
   rememberAgent(agent);
+  setAgentStatus(agent, "connected");
   const operation = attachTabOnce(tabId, agent);
   attachingTabs.set(tabId, operation);
   try {
@@ -429,8 +519,14 @@ async function detachTab(requestedTabId, reason = "Detached by user") {
     await removeLatchCursor(tabId);
     await chrome.debugger.detach({ tabId }).catch(() => {});
   }
+  const owner = tabAgents.get(tabId) ?? null;
   await clearTabOwnership(tabId, reason);
   requestedDetachReasons.delete(tabId);
+  // Detaching from the popup never reaches dispatchBrowserCommand, so the
+  // owning agent is stood down here instead.
+  if (owner && ![...tabAgents.entries()].some(([id, name]) => name === owner && attachedTabs.has(id))) {
+    setAgentStatus(owner, "idle");
+  }
   return { tabId, attached: false };
 }
 
@@ -678,8 +774,10 @@ function renderLatchCursor(elementId, state) {
   if (pointerPath) pointerPath.setAttribute("fill", `rgb(${accent})`);
 
   const glyph = String(state.glyph || "");
+  const word = String(state.word || "");
   mark.textContent = glyph;
-  root.getElementById("footer-status").textContent = glyph;
+  // The footer mirrors the agent's tab group title: emoji then word.
+  root.getElementById("footer-status").textContent = word ? `${glyph} ${word}` : glyph;
   root.getElementById("footer-name").textContent = String(state.agent || "Agent").slice(0, 36);
   footer.classList.add("active");
 
@@ -764,7 +862,8 @@ async function showLatchCursor(
         to: target,
         agent,
         label: label ?? agent,
-        glyph: glyphForStatus(status),
+        glyph: statusInfo(status).glyph,
+        word: statusInfo(status).word,
         accent: accentRgbForAgent(agent),
         pulse,
         waitMs,
@@ -1227,6 +1326,7 @@ async function browserStatus() {
     connected: Boolean(nativePort),
     attachedTabIds: [...attachedTabs],
     agents: agentSummary(),
+    statuses: statusSummary(),
     ...tabs,
   };
 }
@@ -1348,6 +1448,27 @@ async function browserCloseTab(params) {
   return { tabId, closed: true };
 }
 
+// The status an agent shows while a command runs, and the one it settles on
+// when the command succeeds. Attaching rests on "connected" and detaching on
+// "idle"; everything else rests on "done".
+const COMMAND_STATUSES = {
+  browser_attach: { busy: "connected", rest: "connected" },
+  browser_detach: { busy: "idle", rest: "idle" },
+  browser_snapshot: { busy: "reading", rest: "done" },
+  browser_navigate: { busy: "navigating", rest: "done" },
+  browser_open: { busy: "navigating", rest: "done" },
+  browser_new_tab: { busy: "navigating", rest: "done" },
+  browser_click: { busy: "clicking", rest: "done" },
+  browser_type: { busy: "typing", rest: "done" },
+  browser_press_key: { busy: "typing", rest: "done" },
+  browser_wait_for: { busy: "waiting", rest: "done" },
+  browser_screenshot: { busy: "reading", rest: "done" },
+  browser_console: { busy: "reading", rest: "done" },
+  browser_network: { busy: "reading", rest: "done" },
+  browser_evaluate: { busy: "working", rest: "done" },
+  browser_close_tab: { busy: "working", rest: "done" },
+};
+
 async function dispatchBrowserCommand(method, params) {
   const request = params ?? {};
   // The caller names itself; that name becomes its tab group title.
@@ -1376,7 +1497,23 @@ async function dispatchBrowserCommand(method, params) {
   if (!command) {
     throw browserError("UNKNOWN_COMMAND", `Unknown browser command: ${method}`);
   }
-  return command(request, agent);
+
+  // browser_status and browser_tabs only read extension state, so they are not
+  // in the table and leave the tab group title alone.
+  const transition = COMMAND_STATUSES[method];
+  if (!transition) {
+    return command(request, agent);
+  }
+
+  setAgentStatus(agent, transition.busy);
+  try {
+    const result = await command(request, agent);
+    setAgentStatus(agent, transition.rest);
+    return result;
+  } catch (error) {
+    setAgentStatus(agent, "error");
+    throw error;
+  }
 }
 
 function addConsoleMessage(tabId, message) {
@@ -1487,10 +1624,10 @@ async function adoptTabsInAgentGroup(groupId) {
   }
   // Only groups named after an agent we have actually seen are adopted, so a
   // user's own tab groups are left alone.
-  if (!group.title || !knownAgents.has(group.title)) {
+  const agent = knownAgentFromGroupTitle(group.title);
+  if (!agent) {
     return;
   }
-  const agent = group.title;
   agentGroupsByKey.set(groupKey(group.windowId, agent), group.id);
   const tabs = await chrome.tabs.query({ groupId: group.id });
   await Promise.allSettled(
@@ -1534,20 +1671,38 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 chrome.tabGroups.onCreated.addListener((group) => {
-  if (group.title && knownAgents.has(group.title)) {
+  if (knownAgentFromGroupTitle(group.title)) {
     void adoptTabsInAgentGroup(group.id);
   }
 });
 
 chrome.tabGroups.onUpdated.addListener((group) => {
-  if (group.title && knownAgents.has(group.title)) {
-    void adoptTabsInAgentGroup(group.id);
+  const agent = knownAgentFromGroupTitle(group.title);
+  if (!agent) {
+    return;
   }
+  // Latch rewrites the title on every status change, which fires this listener.
+  // Skip our own writes; re-running adoption twice per command would retry
+  // attaching any tab in the group that cannot be attached.
+  const owned = agentGroupsByKey.get(groupKey(group.windowId, agent)) === group.id;
+  if (owned && group.title === groupTitleFor(agent, statusForAgent(agent))) {
+    return;
+  }
+  void adoptTabsInAgentGroup(group.id);
 });
 
 chrome.tabGroups.onRemoved.addListener((group) => {
+  const orphaned = new Set();
   for (const [key, id] of agentGroupsByKey.entries()) {
-    if (id === group.id) agentGroupsByKey.delete(key);
+    if (id !== group.id) continue;
+    orphaned.add(key.slice(key.indexOf("::") + 2));
+    agentGroupsByKey.delete(key);
+  }
+  // Drop the status once an agent holds no groups at all, so a stale "Done"
+  // does not reappear on its next group.
+  for (const agent of orphaned) {
+    const stillOwns = [...agentGroupsByKey.keys()].some((key) => key.endsWith(`::${agent}`));
+    if (!stillOwns) agentStatuses.delete(agent);
   }
 });
 
@@ -1567,6 +1722,7 @@ async function uiState() {
       : null,
     attachedTabIds: [...attachedTabs],
     agents: agentSummary(),
+    statuses: statusSummary(),
     activity: activity.slice(0, 10),
   };
 }
@@ -1597,7 +1753,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  recordActivity("setup", "Extension installed. Install the native host to connect Codex CLI.");
+  recordActivity("setup", "Extension installed. Install the native host to connect your agents.");
   connectNativeHost();
 });
 chrome.runtime.onStartup.addListener(connectNativeHost);
