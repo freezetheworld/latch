@@ -272,13 +272,22 @@ ln -s "$PWD/cli/latch.js" /usr/local/bin/latch
 ## Agent skill
 
 `skills/latch/SKILL.md` teaches an agent the house rules: check tabs before opening, reuse before
-creating, stay in the background, never touch another agent's group, and stop before consequential
-clicks. Symlink it into your agent's skills directory:
+creating, scroll with `browser_scroll` rather than `window.scrollBy`, stay in the background, never
+touch another agent's group, and stop before consequential clicks.
 
 ```bash
-ln -s "$PWD/skills/latch" ~/.claude/skills/latch
-ln -s "$PWD/skills/latch" ~/.codex/skills/latch
+npm run install-skill
 ```
+
+That symlinks the skill into every agent installed on this machine — Claude Code, Codex, Gemini,
+Cursor, and the shared `~/.agents/skills` directory other harnesses read — and puts the `latch`
+command on your `PATH` at `~/.local/bin`. Because it links rather than copies, editing
+`skills/latch/SKILL.md` updates every agent at once.
+
+It only writes into config directories that already exist, so it will not create a `~/.gemini` for an
+agent you do not use. Pass `--all` to install everywhere regardless, `--copy` for an agent that will
+not follow a symlink, and `npm run uninstall-skill` to remove it again. Restart your agent sessions
+afterwards.
 
 ## Codex plugin
 
@@ -328,6 +337,7 @@ tests/       node:test suites
 ## Uninstall
 
 ```bash
+npm run uninstall-skill
 npm run uninstall-host
 ```
 

@@ -28,6 +28,8 @@
   "scripts": {
     "check": "node scripts/check.js",
     "install-host": "node scripts/install-native-host.js",
+    "install-skill": "node scripts/install-skill.js",
+    "uninstall-skill": "node scripts/install-skill.js --uninstall",
     "uninstall-host": "node scripts/install-native-host.js --uninstall",
     "mcp": "node server/mcp-server.js",
     "test": "node --test",

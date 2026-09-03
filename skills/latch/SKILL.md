@@ -39,6 +39,9 @@ Do not use `browser_new_tab` unless the user explicitly asks for another or sepa
 
 Keep `active=false` for normal work so Chrome stays in the background. Set `active=true` only when the user explicitly asks to see, open in front, or switch to the page. Browser work must not use macOS screen capture, Accessibility, AppleScript, or desktop input automation.
 
+The group title also carries your live status, as an emoji and a word — `Codex · ⏳ Working`,
+then `Codex · ✅ Done`. Latch sets that from the command you are running; you do not manage it.
+
 Your tabs belong in the tab group named after you. Tabs opened by a controlled page are adopted into that same group automatically. Never reuse, adopt, or move tabs that belong to another agent's group, and never move unrelated user tabs into yours.
 
 ## Page actions
