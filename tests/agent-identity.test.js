@@ -3,7 +3,9 @@ import fs from "node:fs";
 import test from "node:test";
 import {
   agentFromGroupTitle,
+  AGENT_CALLSIGNS,
   AGENT_STATUSES,
+  callsignName,
   colorForAgent,
   detectAgentName,
   DEFAULT_AGENT_NAME,
@@ -12,6 +14,7 @@ import {
   groupTitleFor,
   normalizeAgentName,
   resolveAgentName,
+  resolveSessionId,
   STATUS_ALIASES,
   statusInfo,
   statusKey,
@@ -118,8 +121,47 @@ test("the extension's copy of the status vocabulary matches the server's", () =>
 
   assert.deepEqual(literal("AGENT_STATUSES"), AGENT_STATUSES);
   assert.deepEqual(literal("STATUS_ALIASES"), STATUS_ALIASES);
+
+  const callsigns = source.match(/const AGENT_CALLSIGNS = \[([\s\S]*?)\];/);
+  assert.ok(callsigns, "AGENT_CALLSIGNS not found in extension/background.js");
+  assert.deepEqual(new Function(`return [${callsigns[1]}]`)(), AGENT_CALLSIGNS);
   assert.ok(
     source.includes('const STATUS_SEPARATOR = " \\u00B7 "'),
     "extension STATUS_SEPARATOR differs from the server's",
   );
+});
+
+test("a session id is stable across CLI invocations from one shell", () => {
+  // The CLI is a fresh process each call, so the id comes from the environment
+  // rather than being generated per process.
+  assert.equal(resolveSessionId({}, 4711), resolveSessionId({}, 4711));
+  assert.notEqual(resolveSessionId({}, 4711), resolveSessionId({}, 4712));
+
+  // An explicit id wins, then a known agent or terminal session, then the ppid.
+  assert.equal(resolveSessionId({ LATCH_SESSION: "mine" }, 1), "mine");
+  assert.equal(resolveSessionId({ CLAUDE_SESSION_ID: "abc" }, 1), "CLAUDE_SESSION_ID:abc");
+  assert.equal(resolveSessionId({ TMUX_PANE: "%3" }, 1), "TMUX_PANE:%3");
+  assert.equal(
+    resolveSessionId({ CLAUDE_SESSION_ID: "abc", TMUX_PANE: "%3" }, 1),
+    "CLAUDE_SESSION_ID:abc",
+    "the agent's own session should outrank the terminal",
+  );
+  assert.equal(resolveSessionId({ LATCH_SESSION: "  " }, 9), "ppid:9", "blank ids are ignored");
+});
+
+test("callsign names stay inside the tab group title limit", () => {
+  assert.equal(callsignName("Claude Code", 0), "Claude Nova");
+  assert.equal(callsignName("Codex", 0), "Codex Nova");
+
+  // The brand is the first word, so a two-word agent does not grow a third.
+  assert.equal(callsignName("Claude Code", 1).split(" ").length, 2);
+
+  for (let i = -5; i < AGENT_CALLSIGNS.length + 5; i++) {
+    const name = callsignName("AnExceedinglyLongAgentName", i);
+    assert.ok(name.length <= MAX_AGENT_NAME_LENGTH, `${name} is ${name.length} characters`);
+    assert.ok(AGENT_CALLSIGNS.includes(name.split(" ").pop()), `${name} has no callsign`);
+  }
+
+  // Every callsign is distinct, or two sessions would still collide.
+  assert.equal(new Set(AGENT_CALLSIGNS).size, AGENT_CALLSIGNS.length);
 });

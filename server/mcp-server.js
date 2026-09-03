@@ -6,7 +6,7 @@ import process from "node:process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { resolveAgentName } from "./agent-identity.js";
+import { resolveAgentName, resolveSessionId } from "./agent-identity.js";
 import { bridgeSocketPath } from "./bridge-path.js";
 import { encodeJsonLine, JsonLineDecoder } from "./native-protocol.js";
 
@@ -91,13 +91,19 @@ function errorToolResult(error) {
   };
 }
 
+// Identifies this MCP server process to the extension. Two agents that ask for
+// the same name are told apart by this, and the second one is given a variant.
+const SESSION_ID = resolveSessionId();
+
 const optionalAgent = z
   .string()
   .optional()
   .describe(
     "Name of the agent making this call. It becomes the title of the Chrome tab group " +
       "holding this agent's tabs, so several agents can share one Chrome profile. " +
-      "Defaults to $LATCH_AGENT, then to an auto-detected name.",
+      "Defaults to $LATCH_AGENT, then to an auto-detected name. If another live " +
+      "session already holds that name, this one is given a callsign variant of " +
+      "it instead; browser_status reports the name actually in use.",
   );
 
 /**
@@ -112,7 +118,9 @@ function registerBrowserTool(name, definition, method = name) {
   server.registerTool(name, definitionWithAgent, async (params) => {
     try {
       const { agent, ...rest } = params ?? {};
-      return jsonToolResult(await callBridge(method, { ...rest, agent: resolveAgentName(agent) }));
+      return jsonToolResult(
+        await callBridge(method, { ...rest, agent: resolveAgentName(agent), session: SESSION_ID }),
+      );
     } catch (error) {
       return errorToolResult(error);
     }
@@ -228,7 +236,7 @@ server.registerTool(
       const { agent, ...rest } = params ?? {};
       const result = await callBridge(
         "browser_screenshot",
-        { ...rest, agent: resolveAgentName(agent) },
+        { ...rest, agent: resolveAgentName(agent), session: SESSION_ID },
         45_000,
       );
       return {

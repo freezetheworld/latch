@@ -22,6 +22,38 @@ const KNOWN_AGENT_COLORS = {
   hermes: "yellow",
 };
 
+// When two sessions want the same name, the second one takes the base name
+// plus a callsign: "Claude Code" becomes "Claude Nova". Mirrors
+// server/agent-identity.js.
+const AGENT_CALLSIGNS = [
+  "Nova", "Orion", "Vega", "Atlas", "Echo", "Zephyr", "Onyx", "Quasar",
+  "Lynx", "Kodiak", "Falcon", "Cobalt", "Ember", "Sable", "Vertex", "Halo",
+  "Rogue", "Titan", "Drift", "Prism", "Comet", "Saber", "Aurora", "Flint",
+];
+
+function hashString(value) {
+  const key = String(value ?? "");
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return hash;
+}
+
+/** The nth callsign variant of a name, keeping the first word as the brand. */
+function callsignName(baseName, index) {
+  const root = String(baseName ?? "").trim().split(/\s+/)[0] || DEFAULT_AGENT_NAME;
+  const size = AGENT_CALLSIGNS.length;
+  const callsign = AGENT_CALLSIGNS[((Math.trunc(index) % size) + size) % size];
+  const roomForRoot = MAX_AGENT_NAME_LENGTH - callsign.length - 1;
+  return `${root.slice(0, Math.max(1, roomForRoot))} ${callsign}`;
+}
+
+/** Session ids are opaque; keep them short and single-line. */
+function normalizeSessionId(raw) {
+  if (typeof raw !== "string") return null;
+  const cleaned = raw.replace(/\s+/g, " ").trim();
+  return cleaned ? cleaned.slice(0, 64) : null;
+}
+
 function normalizeAgentName(raw) {
   if (typeof raw !== "string") return null;
   const cleaned = raw.replace(/\s+/g, " ").trim();
@@ -32,9 +64,7 @@ function normalizeAgentName(raw) {
 function colorForAgent(name) {
   const key = String(name ?? "").trim().toLowerCase();
   if (KNOWN_AGENT_COLORS[key]) return KNOWN_AGENT_COLORS[key];
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
-  return GROUP_COLORS[hash % GROUP_COLORS.length];
+  return GROUP_COLORS[hashString(key) % GROUP_COLORS.length];
 }
 
 // The on-page overlay is tinted with the same colour as the agent's Chrome tab
@@ -130,6 +160,9 @@ const tabAgents = new Map();
 const knownAgents = new Set();
 // agent -> status key, the second half of that agent's tab group title.
 const agentStatuses = new Map();
+// Session id -> { name, requested, lastSeen }. Two agents that ask for the same
+// name are separated here: the first keeps it, the next gets a callsign.
+const agentSessions = new Map();
 const cursorPositions = new Map();
 const requestedDetachReasons = new Map();
 const consoleMessages = new Map();
@@ -249,6 +282,130 @@ function groupKey(windowId, agent) {
 
 function rememberAgent(agent) {
   if (agent) knownAgents.add(agent);
+}
+
+// --- Session names --------------------------------------------------------
+// A session is considered live while it is being used, or for as long as it
+// still holds attached tabs. Once it is neither, its name is released so the
+// next agent of that type can take the plain name back.
+const SESSION_IDLE_MS = 30 * 60 * 1_000;
+const SESSION_STORAGE_KEY = "latchAgentSessions";
+let sessionsHydrated = null;
+
+/** Reload the session table after a service-worker restart. */
+function hydrateAgentSessions() {
+  sessionsHydrated ??= chrome.storage.session
+    .get(SESSION_STORAGE_KEY)
+    .then((stored) => {
+      for (const [id, entry] of Object.entries(stored?.[SESSION_STORAGE_KEY] ?? {})) {
+        if (!entry?.name || agentSessions.has(id)) continue;
+        agentSessions.set(id, entry);
+        // Restoring these also lets group adoption work again after a restart.
+        knownAgents.add(entry.name);
+      }
+    })
+    .catch(() => {
+      // Storage is unavailable; names are still resolved, just not remembered.
+    });
+  return sessionsHydrated;
+}
+
+// lastSeen changes on every command, so the table is flushed on a timer rather
+// than on each write. Claiming a name always flushes immediately.
+const SESSION_PERSIST_INTERVAL_MS = 30 * 1_000;
+let sessionsPersistedAt = 0;
+
+function persistAgentSessions({ force = false } = {}) {
+  if (!force && Date.now() - sessionsPersistedAt < SESSION_PERSIST_INTERVAL_MS) return;
+  sessionsPersistedAt = Date.now();
+  chrome.storage.session
+    .set({ [SESSION_STORAGE_KEY]: Object.fromEntries(agentSessions) })
+    .catch(() => {});
+}
+
+function agentHoldsAttachedTab(name) {
+  for (const [tabId, owner] of tabAgents.entries()) {
+    if (owner === name && attachedTabs.has(tabId)) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether `name` is available to `session`. A name held by a session that has
+ * gone quiet and owns no tabs is reclaimed rather than blocking forever.
+ */
+function nameIsAvailable(name, session) {
+  for (const [id, entry] of agentSessions.entries()) {
+    if (id === session || entry.name !== name) continue;
+    if (Date.now() - (entry.lastSeen ?? 0) < SESSION_IDLE_MS || agentHoldsAttachedTab(name)) {
+      return false;
+    }
+    agentSessions.delete(id);
+  }
+  return true;
+}
+
+/**
+ * The first free callsign variant of `requested`, seeded by the session id.
+ * Prefers a variant whose tab group colour is not already on screen, so two
+ * sessions of one agent are told apart by colour as well as by name. With more
+ * live agents than Chrome has colours, some reuse is unavoidable.
+ */
+function availableVariant(requested, session) {
+  const start = hashString(session);
+  const takenColors = new Set([colorForAgent(requested)]);
+  for (const [id, entry] of agentSessions.entries()) {
+    if (id !== session) takenColors.add(colorForAgent(entry.name));
+  }
+
+  const fallbacks = [];
+  for (let offset = 0; offset < AGENT_CALLSIGNS.length; offset++) {
+    const candidate = callsignName(requested, start + offset);
+    if (!nameIsAvailable(candidate, session)) continue;
+    if (!takenColors.has(colorForAgent(candidate))) return candidate;
+    fallbacks.push(candidate);
+  }
+  if (fallbacks.length) return fallbacks[0];
+  // Every callsign is in use, which takes 24 concurrent sessions of one agent.
+  for (let n = 2; ; n++) {
+    const candidate = normalizeAgentName(`${requested} ${n}`);
+    if (nameIsAvailable(candidate, session)) return candidate;
+  }
+}
+
+/**
+ * The name this session actually gets. The first session to ask for a name
+ * keeps it; a later session asking for the same one is given a callsign, so two
+ * Claude Code windows show up as "Claude Code" and "Claude Nova" rather than
+ * sharing a single tab group.
+ */
+function claimAgentName(requested, session) {
+  // Keyed by session *and* requested name, so one session that renames itself
+  // and two processes that happen to share a session id never fight over one
+  // entry.
+  const key = `${session ?? "anonymous"}::${requested}`;
+  const existing = agentSessions.get(key);
+  // A session that keeps asking for the same name keeps the name it was given.
+  if (existing) {
+    existing.lastSeen = Date.now();
+    rememberAgent(existing.name);
+    persistAgentSessions();
+    return existing.name;
+  }
+
+  const name = nameIsAvailable(requested, key) ? requested : availableVariant(requested, key);
+  agentSessions.set(key, { name, requested, lastSeen: Date.now() });
+  rememberAgent(name);
+  persistAgentSessions({ force: true });
+  if (name !== requested) {
+    recordActivity(
+      "agent",
+      `“${requested}” is already in use, so this session is “${name}”`,
+      { requested, name },
+    );
+    broadcastStateUpdate();
+  }
+  return name;
 }
 
 function statusForAgent(agent) {
@@ -1320,10 +1477,13 @@ function agentSummary() {
   return summary;
 }
 
-async function browserStatus() {
+async function browserStatus(_params, agent = null) {
   const tabs = await browserTabs();
   return {
     connected: Boolean(nativePort),
+    // The name this caller is actually using, which may be a callsign variant
+    // of the one it asked for.
+    agent,
     attachedTabIds: [...attachedTabs],
     agents: agentSummary(),
     statuses: statusSummary(),
@@ -1471,9 +1631,11 @@ const COMMAND_STATUSES = {
 
 async function dispatchBrowserCommand(method, params) {
   const request = params ?? {};
-  // The caller names itself; that name becomes its tab group title.
-  const agent = normalizeAgentName(request.agent) ?? DEFAULT_AGENT_NAME;
-  rememberAgent(agent);
+  // The caller names itself, but two sessions of the same agent ask for the
+  // same name. The registry hands the second one a callsign instead.
+  const requested = normalizeAgentName(request.agent) ?? DEFAULT_AGENT_NAME;
+  await hydrateAgentSessions();
+  const agent = claimAgentName(requested, normalizeSessionId(request.session));
   const commands = {
     browser_status: browserStatus,
     browser_tabs: browserTabs,
@@ -1731,7 +1893,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const handlers = {
     ui_get_state: () => uiState(),
     // The popup is a person acting directly, so it gets its own group label.
-    ui_attach: ({ tabId, agent }) => attachTab(tabId, normalizeAgentName(agent) ?? "Me"),
+    ui_attach: async ({ tabId, agent }) => {
+      await hydrateAgentSessions();
+      const name = claimAgentName(normalizeAgentName(agent) ?? "Me", "ui:popup");
+      return attachTab(tabId, name);
+    },
     ui_detach: ({ tabId }) => detachTab(tabId),
     ui_retry_connection: async () => {
       if (nativePort) {

@@ -47,6 +47,8 @@ Everything is local. No cloud service, no remote browser, no account.
   so you can see what each agent is doing without opening anything.
 - **Strict ownership** — an agent only ever reuses or adopts its *own* tabs, never another agent's
   and never your personal groups.
+- **No duplicate names** — open a second Claude Code and it becomes **Claude Nova**, not a second
+  **Claude Code** sharing the first one's group.
 - **Reuse before opening** — `browser_open` finds a matching tab before creating a new one, so your
   window does not fill up with duplicates.
 - **Background-first** — task tabs never steal focus unless the agent is explicitly asked to show you.
@@ -141,6 +143,31 @@ LATCH_AGENT="Research" latch open https://example.net
 Known agents keep a fixed colour — Claude Code purple, Codex cyan, Gemini blue, Cursor orange,
 DeepSeek green, Hermes yellow. Any other name hashes deterministically into Chrome's palette, so the
 same agent always lands on the same colour.
+
+### Two of the same agent
+
+Two Claude Code windows both call themselves "Claude Code". Rather than pile their tabs into one
+group, Latch gives the second one a callsign:
+
+```text
+Claude Code · ⏳ Working      first session
+Claude Nova · ✅ Done         second session, same agent
+```
+
+The first word of the name is kept as the brand and a callsign replaces the rest, so `Codex` becomes
+`Codex Vega`, `Gemini` becomes `Gemini Atlas`, and so on for any agent. Latch also steers each
+variant towards a tab group colour that is not already on screen, so sessions are distinguishable by
+colour as well as by name — until you have more live agents than Chrome has colours, which is nine.
+
+This works because every request carries an opaque session id alongside the name, derived from
+`$LATCH_SESSION`, then the agent's own session variable (`CLAUDE_SESSION_ID`, `CODEX_SESSION_ID`,
+`CURSOR_TRACE_ID`, ...), then the terminal (`ITERM_SESSION_ID`, `TMUX_PANE`), and finally the parent
+process id. It is stable across CLI invocations from the same shell, so a session keeps its name for
+as long as it is in use.
+
+A name is released once its session has been quiet for 30 minutes **and** holds no attached tabs, so
+the plain name comes back for the next agent instead of being locked away. `browser_status` reports
+the name a caller is actually using.
 
 ### Live status
 

@@ -12,6 +12,7 @@
  */
 
 export const AGENT_ENV_VAR = "LATCH_AGENT";
+export const SESSION_ENV_VAR = "LATCH_SESSION";
 export const DEFAULT_AGENT_NAME = "Agent";
 export const MAX_AGENT_NAME_LENGTH = 24;
 
@@ -63,12 +64,78 @@ export function resolveAgentName(explicit, env = process.env) {
   return normalizeAgentName(explicit) ?? detectAgentName(env);
 }
 
+/** Small stable string hash, used to spread names and colors over a palette. */
+export function hashString(value) {
+  const key = String(value ?? "");
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return hash;
+}
+
 export function colorForAgent(name) {
   const key = String(name ?? "").trim().toLowerCase();
   if (KNOWN_AGENT_COLORS[key]) return KNOWN_AGENT_COLORS[key];
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
-  return GROUP_COLORS[hash % GROUP_COLORS.length];
+  return GROUP_COLORS[hashString(key) % GROUP_COLORS.length];
+}
+
+// --- Session identity -----------------------------------------------------
+// Two Claude Code windows both call themselves "Claude Code". To tell them
+// apart, every request also carries an opaque session id, and the extension
+// hands the second one a different name. The id has to survive across CLI
+// invocations from the same shell, so it is derived from the environment
+// rather than generated per process.
+
+/** Session variables agents export, most specific first. */
+const SESSION_ENV_KEYS = [
+  "CLAUDE_SESSION_ID",
+  "CLAUDE_CODE_SESSION_ID",
+  "CODEX_SESSION_ID",
+  "CODEX_THREAD_ID",
+  "CURSOR_TRACE_ID",
+  "GEMINI_SESSION",
+  "DEEPSEEK_SESSION",
+  "HERMES_SESSION",
+  // Then the terminal the agent runs in, which is stable per window or pane.
+  "ITERM_SESSION_ID",
+  "TERM_SESSION_ID",
+  "TMUX_PANE",
+];
+
+/**
+ * A stable id for this agent session. Falls back to the parent process id,
+ * which is the shell for a CLI call and the agent itself for the MCP server.
+ */
+export function resolveSessionId(env = process.env, parentPid = process.ppid) {
+  const explicit = String(env[SESSION_ENV_VAR] ?? "").trim();
+  if (explicit) return explicit.slice(0, 64);
+  for (const key of SESSION_ENV_KEYS) {
+    const value = String(env[key] ?? "").trim();
+    if (value) return `${key}:${value}`.slice(0, 64);
+  }
+  return `ppid:${parentPid}`;
+}
+
+// --- Name collisions ------------------------------------------------------
+// When a name is already claimed by another live session, the newcomer takes
+// the base name plus a callsign: "Claude Code" becomes "Claude Nova".
+
+export const AGENT_CALLSIGNS = [
+  "Nova", "Orion", "Vega", "Atlas", "Echo", "Zephyr", "Onyx", "Quasar",
+  "Lynx", "Kodiak", "Falcon", "Cobalt", "Ember", "Sable", "Vertex", "Halo",
+  "Rogue", "Titan", "Drift", "Prism", "Comet", "Saber", "Aurora", "Flint",
+];
+
+/**
+ * The nth callsign variant of a name. The first word is kept as the brand, so
+ * "Claude Code" yields "Claude Nova" rather than "Claude Code Nova". The result
+ * still fits MAX_AGENT_NAME_LENGTH.
+ */
+export function callsignName(baseName, index) {
+  const root = String(baseName ?? "").trim().split(/\s+/)[0] || DEFAULT_AGENT_NAME;
+  const size = AGENT_CALLSIGNS.length;
+  const callsign = AGENT_CALLSIGNS[((Math.trunc(index) % size) + size) % size];
+  const roomForRoot = MAX_AGENT_NAME_LENGTH - callsign.length - 1;
+  return `${root.slice(0, Math.max(1, roomForRoot))} ${callsign}`;
 }
 
 // --- Agent status ---------------------------------------------------------

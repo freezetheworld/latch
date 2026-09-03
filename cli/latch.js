@@ -3,7 +3,7 @@
 import crypto from "node:crypto";
 import net from "node:net";
 import process from "node:process";
-import { resolveAgentName } from "../server/agent-identity.js";
+import { resolveAgentName, resolveSessionId } from "../server/agent-identity.js";
 import { bridgeSocketPath } from "../server/bridge-path.js";
 import { encodeJsonLine, JsonLineDecoder } from "../server/native-protocol.js";
 
@@ -95,7 +95,9 @@ function parseArgs(argv) {
 
 function buildParams(command, options, positional) {
   // Every request names its agent; the extension groups tabs by that name.
-  const p = { agent: resolveAgentName(options.agent) };
+  // The session id lets the extension tell two shells running the same agent
+  // apart, so the second one gets a callsign instead of a duplicate name.
+  const p = { agent: resolveAgentName(options.agent), session: resolveSessionId() };
   if (options.tabId !== undefined) p.tabId = options.tabId;
   if (options.ref !== undefined) p.ref = options.ref;
   if (options.selector !== undefined) p.selector = options.selector;

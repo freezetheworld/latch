@@ -20,6 +20,11 @@ latch --agent "<your name>" snapshot
 land in a tab group titled after you. Several agents share this Chrome profile at once; that group
 name is how the user tells your tabs apart from each other's and from their own.
 
+If another live session already holds the name you ask for, you are given a callsign variant of it
+instead — ask for `Claude Code` while another Claude Code is running and you become `Claude Nova`.
+Call `browser_status` to see the name you actually hold, and use that name when you tell the user
+which tab group is yours. Do not try to take the plain name back.
+
 ## Tab ownership and reuse
 
 Before opening any page, call `browser_tabs`. Reuse the relevant existing tab whenever possible.
