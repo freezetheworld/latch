@@ -51,6 +51,9 @@ Everything is local. No cloud service, no remote browser, no account.
   **Claude Code** sharing the first one's group.
 - **Reuse before opening** — `browser_open` finds a matching tab before creating a new one, so your
   window does not fill up with duplicates.
+- **Scrolling that works on real apps** — when the window does not scroll, the largest scrollable
+  container on screen is scrolled instead, so "scroll down" means the same thing on a blog and in a
+  mail client.
 - **Background-first** — task tabs never steal focus unless the agent is explicitly asked to show you.
 - **A visible cursor** on the page, labelled with the acting agent's name, so you can see what is
   happening and who is doing it.
@@ -194,6 +197,40 @@ agent's colour swatch.
 - Only groups titled after an agent seen this session are adopted, so your own groups
   (`Work`, `Reading`, ...) are never taken over.
 
+## Scrolling
+
+Agent scrolling usually fails for one of two reasons: the agent has no idea there is more page below
+the fold, or the window is not what scrolls. Latch handles both.
+
+`browser_snapshot` reports where the page is scrolled to, and lists the scrollable containers on
+screen:
+
+```json
+"scroll":     { "y": 1566, "percent": 27, "atBottom": false, "scrollsVertically": true },
+"scrollers":  [ { "ref": "s1", "tag": "div", "name": "message-list", "percent": 6 } ],
+"textTruncated": false
+```
+
+`browser_scroll` then moves it:
+
+```bash
+latch scroll              # one screenful down, with overlap so nothing is skipped
+latch scroll bottom       # jump to the end
+latch scroll --amount 400 # a specific distance
+latch scroll --ref s1     # scroll one particular container
+latch scroll --selector "#load-more"   # bring an element into view
+```
+
+When the window itself cannot scroll, the largest scrollable container on screen is used, so inner
+panes in mail, chat, and dashboard layouts work without the agent having to work out which `div`
+owns the content. A `ref` naming a scrollable container scrolls that container; a `ref` naming
+anything else brings it into view.
+
+Every call reports `movedY`, `percent`, `remaining` and `atBottom`, so an infinite feed can be walked
+until it stops growing rather than guessed at. If nothing moved, the result says so instead of
+looking like a successful scroll — and as a fallback for pages that hijack the wheel rather than
+using a real scroll container, a genuine wheel event is sent before giving up.
+
 ## MCP tools
 
 | Tool | Purpose |
@@ -201,7 +238,8 @@ agent's colour swatch.
 | `browser_status` | Check the bridge and tab attachments |
 | `browser_tabs` | List Chrome tabs |
 | `browser_attach` / `browser_detach` | Start or stop controlling a tab |
-| `browser_snapshot` | Read visible text and interactive element refs |
+| `browser_snapshot` | Read visible text, element refs, and scroll position |
+| `browser_scroll` | Scroll the page, a container, or an element into view |
 | `browser_navigate` | Navigate to a URL |
 | `browser_click` / `browser_type` / `browser_press_key` | Act on page controls |
 | `browser_wait_for` | Wait for a selector or text |

@@ -149,6 +149,7 @@ export const AGENT_STATUSES = {
   working: { glyph: "\u23F3", word: "Working" },
   navigating: { glyph: "\u{1F9ED}", word: "Navigating" },
   reading: { glyph: "\u{1F441}\uFE0F", word: "Reading" },
+  scrolling: { glyph: "\u{1F4DC}", word: "Scrolling" },
   clicking: { glyph: "\u{1F446}", word: "Clicking" },
   typing: { glyph: "\u2328\uFE0F", word: "Typing" },
   waiting: { glyph: "\u23F1\uFE0F", word: "Waiting" },
@@ -163,6 +164,7 @@ export const STATUS_ALIASES = {
   key: "typing",
   navigate: "navigating",
   read: "reading",
+  scroll: "scrolling",
   wait: "waiting",
 };
 

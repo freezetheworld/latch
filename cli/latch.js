@@ -15,6 +15,7 @@ Commands:
   attach [--tab-id N]                 Attach to a tab (active tab if no ID)
   detach [--tab-id N]                 Detach from a tab
   snapshot [--tab-id N] [--max-elements N]  Read page state with element refs
+  scroll [down|up|top|bottom|left|right] [--amount N] [--ref eN | --selector CSS] [--tab-id N]  Scroll the page or a container
   navigate <url> [--tab-id N] [--timeout-ms N]  Navigate to a URL
   click [--ref eN | --selector CSS] [--tab-id N]  Click an element
   type <text> [--ref eN | --selector CSS] [--no-clear] [--tab-id N]  Type text
@@ -37,6 +38,7 @@ Options:
   --selector CSS    CSS selector
   --max-elements N  Max elements in snapshot (default 200, max 500)
   --timeout-ms N    Timeout in milliseconds (default 20000)
+  --amount N        Pixels to scroll (default one screenful)
   --full-page       Capture full page in screenshot
   --save PATH       Save screenshot to file instead of printing base64
   --clear           Clear messages after reading
@@ -56,7 +58,7 @@ function parseArgs(argv) {
   }
   // The command may appear before or after global options such as --agent.
   let command;
-  const options = { agent: undefined, tabId: undefined, ref: undefined, selector: undefined, maxElements: undefined, timeoutMs: undefined, fullPage: false, save: undefined, clear: undefined, text: undefined, active: false, reuseExisting: undefined, attach: undefined };
+  const options = { agent: undefined, tabId: undefined, ref: undefined, selector: undefined, maxElements: undefined, timeoutMs: undefined, fullPage: false, save: undefined, clear: undefined, text: undefined, active: false, reuseExisting: undefined, attach: undefined, amount: undefined };
   const positional = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -72,6 +74,8 @@ function parseArgs(argv) {
     else if (arg.startsWith("--max-elements=")) options.maxElements = parseInt(arg.slice(14), 10);
     else if (arg === "--timeout-ms") options.timeoutMs = parseInt(args[++i], 10);
     else if (arg.startsWith("--timeout-ms=")) options.timeoutMs = parseInt(arg.slice(13), 10);
+    else if (arg === "--amount") options.amount = parseInt(args[++i], 10);
+    else if (arg.startsWith("--amount=")) options.amount = parseInt(arg.slice(9), 10);
     else if (arg === "--full-page") options.fullPage = true;
     else if (arg === "--save") options.save = args[++i];
     else if (arg.startsWith("--save=")) options.save = arg.slice(7);
@@ -109,8 +113,13 @@ function buildParams(command, options, positional) {
   if (options.active !== undefined) p.active = options.active;
   if (options.reuseExisting !== undefined) p.reuseExisting = options.reuseExisting;
   if (options.attach !== undefined) p.attach = options.attach;
+  if (options.amount !== undefined) p.amount = options.amount;
 
   switch (command) {
+    case "scroll":
+      // `latch scroll` alone means one screenful down.
+      if (positional[0]) p.to = positional[0];
+      break;
     case "navigate":
     case "open":
     case "new-tab":
@@ -139,6 +148,7 @@ const COMMAND_MAP = {
   attach: "browser_attach",
   detach: "browser_detach",
   snapshot: "browser_snapshot",
+  scroll: "browser_scroll",
   navigate: "browser_navigate",
   click: "browser_click",
   type: "browser_type",

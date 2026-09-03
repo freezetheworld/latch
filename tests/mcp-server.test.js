@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import test from "node:test";
@@ -35,6 +36,7 @@ test("MCP server advertises the complete browser tool set", async () => {
         "browser_open",
         "browser_press_key",
         "browser_screenshot",
+        "browser_scroll",
         "browser_snapshot",
         "browser_status",
         "browser_tabs",
@@ -57,6 +59,23 @@ test("MCP server advertises the complete browser tool set", async () => {
     const openTool = result.tools.find((tool) => tool.name === "browser_open");
     assert.equal(openTool.inputSchema.properties.active.default, false);
     assert.equal(openTool.inputSchema.properties.reuseExisting.default, true);
+
+    // Every advertised tool must exist on both other sides of the bridge, or a
+    // caller gets "Unknown browser command" at run time instead of here.
+    const advertised = result.tools.map((tool) => tool.name).sort();
+    const background = fs.readFileSync(path.join(projectRoot, "extension", "background.js"), "utf8");
+    const commandTable = background.slice(
+      background.indexOf("const commands = {"),
+      background.indexOf("};", background.indexOf("const commands = {")),
+    );
+    for (const name of advertised) {
+      assert.ok(commandTable.includes(`${name}:`), `${name} is not handled in background.js`);
+    }
+
+    const cli = fs.readFileSync(path.join(projectRoot, "cli", "latch.js"), "utf8");
+    for (const name of advertised) {
+      assert.ok(cli.includes(`"${name}"`), `${name} is not reachable from the CLI`);
+    }
   } finally {
     await client.close();
   }

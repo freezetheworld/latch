@@ -168,6 +168,29 @@ registerBrowserTool("browser_snapshot", {
   },
 });
 
+registerBrowserTool("browser_scroll", {
+  title: "Scroll",
+  description:
+    "Scroll the page, a scrollable container, or an element into view. If the window itself " +
+    "does not scroll, the largest scrollable container on screen is used, so this works on " +
+    "apps whose content lives in an inner pane. Returns how far it moved, how much is left, " +
+    "and whether the end has been reached, so a feed can be walked until `atBottom` is true. " +
+    "Pass a `ref` from browser_snapshot's `scrollers` to scroll one specific container.",
+  inputSchema: {
+    to: z
+      .enum(["down", "up", "top", "bottom", "left", "right"])
+      .optional()
+      .describe("Where to scroll. Defaults to down by one screenful."),
+    amount: z
+      .number()
+      .optional()
+      .describe("Pixels to scroll for down/up/left/right. Defaults to one screenful with overlap."),
+    ref: z.string().optional().describe("Element ref from browser_snapshot. A scrollable container is scrolled itself; anything else is brought into view."),
+    selector: z.string().optional().describe("CSS selector, used the same way as ref."),
+    tabId: z.number().optional().describe("Chrome tab ID. Defaults to the active attached tab."),
+  },
+}, "browser_scroll");
+
 registerBrowserTool("browser_navigate", {
   title: "Navigate an attached tab",
   description: "Navigate an attached tab to any normal HTTP, HTTPS, or file URL.",

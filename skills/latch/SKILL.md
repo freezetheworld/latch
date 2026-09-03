@@ -45,9 +45,23 @@ Your tabs belong in the tab group named after you. Tabs opened by a controlled p
 
 - Use `browser_snapshot` before interacting and prefer its element refs for clicks and typing.
 - Use `browser_wait_for` after actions that load or update UI.
+- `elements` only ever describes what is on screen. Check `scroll` in the snapshot before concluding
+  a page has no more content, and `textTruncated` before concluding you have read all of it.
 - Use `browser_evaluate` only when snapshot-based actions are insufficient.
 - The on-page cursor, labelled with your agent name, is the visible indication that you are acting. Do not hide or remove it during work.
 - Do not inspect cookies, passwords, local storage, or session stores.
+
+## Scrolling
+
+Use `browser_scroll`, not `browser_evaluate` with `window.scrollBy` — the window is often not what
+scrolls, and evaluate will silently do nothing on an app whose content lives in an inner pane.
+
+- `browser_scroll` with no arguments moves one screenful down, keeping a strip of overlap.
+- `to: "bottom"` or `to: "top"` jumps to either end.
+- Pass a `ref` from the snapshot's `scrollers` to move one specific container, or any other `ref` or
+  `selector` to bring that element into view.
+- Walk a feed by scrolling and re-snapshotting until `atBottom` is true or `movedY` is 0. Do not loop
+  past that point; the result tells you when there is nothing left.
 
 ## Consequential actions
 

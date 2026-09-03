@@ -96,6 +96,7 @@ const AGENT_STATUSES = {
   working: { glyph: "\u23F3", word: "Working" },
   navigating: { glyph: "\u{1F9ED}", word: "Navigating" },
   reading: { glyph: "\u{1F441}\uFE0F", word: "Reading" },
+  scrolling: { glyph: "\u{1F4DC}", word: "Scrolling" },
   clicking: { glyph: "\u{1F446}", word: "Clicking" },
   typing: { glyph: "\u2328\uFE0F", word: "Typing" },
   waiting: { glyph: "\u23F1\uFE0F", word: "Waiting" },
@@ -110,6 +111,7 @@ const STATUS_ALIASES = {
   key: "typing",
   navigate: "navigating",
   read: "reading",
+  scroll: "scrolling",
   wait: "waiting",
 };
 
@@ -1111,11 +1113,69 @@ function snapshotPage(maxElements, refAttribute) {
     };
   });
 
+  // Where the page is scrolled to, and what else can scroll. Without this a
+  // caller has no way to know there is more page below the fold, and `elements`
+  // only ever describes what is currently on screen.
+  const overflows = (value) => value === "auto" || value === "scroll" || value === "overlay";
+  const scrollStateOf = (element, isPage) => {
+    const scrollableY = Math.max(0, element.scrollHeight - element.clientHeight);
+    const scrollableX = Math.max(0, element.scrollWidth - element.clientWidth);
+    return {
+      isPage,
+      x: Math.round(element.scrollLeft),
+      y: Math.round(element.scrollTop),
+      scrollHeight: Math.round(element.scrollHeight),
+      clientHeight: Math.round(element.clientHeight),
+      scrollsVertically: scrollableY > 1,
+      scrollsHorizontally: scrollableX > 1,
+      atTop: element.scrollTop <= 1,
+      atBottom: scrollableY - element.scrollTop <= 1,
+      percent: scrollableY > 0 ? Math.round((element.scrollTop / scrollableY) * 100) : 100,
+    };
+  };
+
+  const page = document.scrollingElement || document.documentElement;
+  const scrollers = [];
+  let scrollerIndex = 0;
+  for (const element of document.querySelectorAll("*")) {
+    const style = getComputedStyle(element);
+    const scrollsDown = overflows(style.overflowY) && element.scrollHeight > element.clientHeight + 1;
+    const scrollsAcross = overflows(style.overflowX) && element.scrollWidth > element.clientWidth + 1;
+    if (!scrollsDown && !scrollsAcross) continue;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 40 || rect.height < 40) continue;
+    const area =
+      Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0)) *
+      Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+    if (area <= 0) continue;
+    // Reuse the ref this element already has if it is also an interactive one.
+    const ref = element.getAttribute(refAttribute) || `s${++scrollerIndex}`;
+    element.setAttribute(refAttribute, ref);
+    scrollers.push({
+      ref,
+      area,
+      tag: element.tagName.toLowerCase(),
+      name: normalize(element.getAttribute("aria-label") || element.id || element.classList[0], 60),
+      ...scrollStateOf(element, false),
+    });
+  }
+  // The biggest on-screen container first: on a page whose window does not
+  // scroll, that is the one "scroll down" will act on.
+  scrollers.sort((a, b) => b.area - a.area);
+  scrollers.forEach((entry) => delete entry.area);
+
+  const fullText = String(document.body?.innerText ?? "");
   return {
     url: location.href,
     title: document.title,
     viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
-    text: normalize(document.body?.innerText, 20_000),
+    scroll: scrollStateOf(page, true),
+    // Inner containers, when the window itself is not what scrolls. Pass one of
+    // these refs to browser_scroll to move that container specifically.
+    scrollers: scrollers.slice(0, 5),
+    text: normalize(fullText, 20_000),
+    textLength: fullText.length,
+    textTruncated: fullText.length > 20_000,
     elements,
   };
 }
@@ -1124,8 +1184,124 @@ async function browserSnapshot(params) {
   const tabId = await resolveAttachedTabId(params.tabId);
   const maxElements = Math.min(Math.max(params.maxElements ?? 200, 1), 500);
   const snapshot = await evaluate(tabId, functionExpression(snapshotPage, maxElements, REF_ATTRIBUTE));
-  recordActivity("read", `Read page state (${snapshot.elements.length} elements)`, { tabId });
+  recordActivity(
+    "read",
+    `Read page state (${snapshot.elements.length} elements, ${snapshot.scroll.percent}% scrolled)`,
+    { tabId },
+  );
   return { tabId, ...snapshot };
+}
+
+/**
+ * Finds the element that actually scrolls, and moves it. Runs in the page.
+ *
+ * Most agent scrolling fails because the window does not scroll at all: the
+ * content lives in an inner container (mail, chat, dashboards, modals). When
+ * the document cannot scroll, the largest scrollable container on screen is
+ * used instead, so "scroll down" means the same thing everywhere.
+ */
+function scrollPage(request, refAttribute) {
+  const doc = document.scrollingElement || document.documentElement;
+  const canScrollY = (el) => Boolean(el) && el.scrollHeight > el.clientHeight + 1;
+  const canScrollX = (el) => Boolean(el) && el.scrollWidth > el.clientWidth + 1;
+  const scrollable = (el) => canScrollY(el) || canScrollX(el);
+
+  const findScroller = () => {
+    if (scrollable(doc)) return doc;
+    let best = null;
+    let bestArea = 0;
+    const overflows = (value) => value === "auto" || value === "scroll" || value === "overlay";
+    for (const element of document.querySelectorAll("*")) {
+      const style = getComputedStyle(element);
+      const scrollsDown = overflows(style.overflowY) && canScrollY(element);
+      const scrollsAcross = overflows(style.overflowX) && canScrollX(element);
+      if (!scrollsDown && !scrollsAcross) continue;
+      const rect = element.getBoundingClientRect();
+      if (rect.width < 40 || rect.height < 40) continue;
+      // Rank by how much of the viewport the container occupies, so the main
+      // content region wins over a small sidebar or dropdown.
+      const area =
+        Math.max(0, Math.min(rect.right, innerWidth) - Math.max(rect.left, 0)) *
+        Math.max(0, Math.min(rect.bottom, innerHeight) - Math.max(rect.top, 0));
+      if (area > bestArea) {
+        bestArea = area;
+        best = element;
+      }
+    }
+    return best ?? doc;
+  };
+
+  let scroller = null;
+  let target = null;
+  if (request.ref || request.selector) {
+    const selector = request.ref
+      ? `[${refAttribute}="${CSS.escape(request.ref)}"]`
+      : request.selector;
+    target = document.querySelector(selector);
+    if (!target) throw new Error(`Element not found: ${selector}`);
+    // A scrollable element the caller names is scrolled itself. Anything else
+    // is brought into view inside whichever container holds it.
+    if (scrollable(target)) scroller = target;
+  }
+  scroller = scroller ?? findScroller();
+
+  const describe = (element) => {
+    if (element === doc) return "page";
+    const id = element.id ? `#${element.id}` : "";
+    const cls = element.classList[0] ? `.${element.classList[0]}` : "";
+    return `${element.tagName.toLowerCase()}${id}${cls}`;
+  };
+  const measure = () => ({
+    x: Math.round(scroller.scrollLeft),
+    y: Math.round(scroller.scrollTop),
+    scrollWidth: Math.round(scroller.scrollWidth),
+    scrollHeight: Math.round(scroller.scrollHeight),
+    clientWidth: Math.round(scroller.clientWidth),
+    clientHeight: Math.round(scroller.clientHeight),
+  });
+
+  const before = measure();
+  const to = String(request.to || "down").toLowerCase();
+  const broughtIntoView = Boolean(target) && scroller !== target;
+
+  if (broughtIntoView) {
+    target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
+  } else if (to !== "none") {
+    // A page-sized step keeps a strip of overlap, so nothing is skipped between
+    // one screenful and the next.
+    const step = Math.max(1, scroller.clientHeight - 80);
+    const amount = Number.isFinite(request.amount) ? Math.abs(request.amount) : step;
+    if (to === "top") scroller.scrollTo({ top: 0, behavior: "instant" });
+    else if (to === "bottom") scroller.scrollTo({ top: scroller.scrollHeight, behavior: "instant" });
+    else if (to === "up") scroller.scrollBy({ top: -amount, behavior: "instant" });
+    else if (to === "left") scroller.scrollBy({ left: -amount, behavior: "instant" });
+    else if (to === "right") scroller.scrollBy({ left: amount, behavior: "instant" });
+    else scroller.scrollBy({ top: amount, behavior: "instant" });
+  }
+
+  const after = measure();
+  const rect = scroller === doc ? null : scroller.getBoundingClientRect();
+  const scrollableY = Math.max(0, after.scrollHeight - after.clientHeight);
+  return {
+    scroller: describe(scroller),
+    isPage: scroller === doc,
+    // Where to aim a real wheel event if the JavaScript scroll did not take.
+    point: rect
+      ? {
+          x: Math.round(Math.min(Math.max(rect.left + rect.width / 2, 1), innerWidth - 1)),
+          y: Math.round(Math.min(Math.max(rect.top + rect.height / 2, 1), innerHeight - 1)),
+        }
+      : { x: Math.round(innerWidth / 2), y: Math.round(innerHeight / 2) },
+    broughtIntoView,
+    before,
+    after,
+    movedX: after.x - before.x,
+    movedY: after.y - before.y,
+    atTop: after.y <= 1,
+    atBottom: scrollableY - after.y <= 1,
+    remaining: Math.max(0, scrollableY - after.y),
+    percent: scrollableY > 0 ? Math.round((after.y / scrollableY) * 100) : 100,
+  };
 }
 
 function locateElement(target, refAttribute) {
@@ -1183,6 +1359,85 @@ async function browserClick(params, agent = DEFAULT_AGENT_NAME) {
   });
   recordActivity("action", `Clicked ${params.ref ?? params.selector}`, { tabId });
   return { tabId, clicked: params.ref ?? params.selector, point };
+}
+
+/**
+ * Scrolls the page, a named container, or an element into view.
+ *
+ * The page is measured before and after, so the caller is told how far it
+ * actually moved and how much is left. When a page hijacks the wheel instead of
+ * using a real scroll container, the JavaScript scroll moves nothing; a genuine
+ * wheel event is sent as a second attempt rather than silently doing nothing.
+ */
+async function browserScroll(params, agent = DEFAULT_AGENT_NAME) {
+  const tabId = await resolveAttachedTabId(params.tabId);
+  const to = String(params.to ?? params.direction ?? "down").toLowerCase();
+  const request = { ref: params.ref, selector: params.selector, to, amount: params.amount };
+  let result = await evaluate(tabId, functionExpression(scrollPage, request, REF_ATTRIBUTE));
+  let method = "script";
+
+  const stuck =
+    !result.broughtIntoView &&
+    result.movedX === 0 &&
+    result.movedY === 0 &&
+    !(to === "top" ? result.atTop : to === "bottom" ? result.atBottom : false);
+
+  if (stuck && to !== "none") {
+    const step = Math.max(1, result.after.clientHeight - 80);
+    const amount = Number.isFinite(params.amount) ? Math.abs(params.amount) : step;
+    const deltas = {
+      up: { deltaX: 0, deltaY: -amount },
+      down: { deltaX: 0, deltaY: amount },
+      left: { deltaX: -amount, deltaY: 0 },
+      right: { deltaX: amount, deltaY: 0 },
+      top: { deltaX: 0, deltaY: -result.after.scrollHeight },
+      bottom: { deltaX: 0, deltaY: result.after.scrollHeight },
+    };
+    await sendDebuggerCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x: result.point.x,
+      y: result.point.y,
+      ...(deltas[to] ?? deltas.down),
+    });
+    result = await evaluate(
+      tabId,
+      functionExpression(scrollPage, { ...request, to: "none" }, REF_ATTRIBUTE),
+    );
+    method = "wheel";
+  }
+
+  await showLatchCursor(tabId, {
+    x: result.point.x,
+    y: result.point.y,
+    agent,
+    label: `${agent} \u00B7 Scroll`,
+    status: "scrolling",
+    durationMs: 900,
+  });
+
+  const moved = result.movedX !== 0 || result.movedY !== 0 || result.broughtIntoView;
+  recordActivity(
+    "action",
+    result.broughtIntoView
+      ? `Scrolled ${params.ref ?? params.selector} into view`
+      : `Scrolled ${to} in ${result.scroller} (${result.percent}%)`,
+    { tabId },
+  );
+  return {
+    tabId,
+    ...result,
+    method,
+    moved,
+    // Nothing moved and nothing is in the way: say so, rather than returning a
+    // success the caller cannot distinguish from a real scroll.
+    note: moved
+      ? undefined
+      : result.atBottom && (to === "down" || to === "bottom")
+        ? "Already at the bottom of this scroller."
+        : result.atTop && (to === "up" || to === "top")
+          ? "Already at the top of this scroller."
+          : `Nothing scrolled. Pass a selector for the container that holds the content, or use browser_press_key with PageDown.`,
+  };
 }
 
 function focusElement(target, refAttribute, clear) {
@@ -1615,6 +1870,7 @@ const COMMAND_STATUSES = {
   browser_attach: { busy: "connected", rest: "connected" },
   browser_detach: { busy: "idle", rest: "idle" },
   browser_snapshot: { busy: "reading", rest: "done" },
+  browser_scroll: { busy: "scrolling", rest: "done" },
   browser_navigate: { busy: "navigating", rest: "done" },
   browser_open: { busy: "navigating", rest: "done" },
   browser_new_tab: { busy: "navigating", rest: "done" },
@@ -1642,6 +1898,7 @@ async function dispatchBrowserCommand(method, params) {
     browser_attach: ({ tabId }) => attachTab(tabId, agent),
     browser_detach: ({ tabId }) => detachTab(tabId),
     browser_snapshot: browserSnapshot,
+    browser_scroll: browserScroll,
     browser_navigate: browserNavigate,
     browser_click: browserClick,
     browser_type: browserType,
