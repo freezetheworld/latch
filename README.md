@@ -54,6 +54,8 @@ Everything is local. No cloud service, no remote browser, no account.
 - **Scrolling that works on real apps** — when the window does not scroll, the largest scrollable
   container on screen is scrolled instead, so "scroll down" means the same thing on a blog and in a
   mail client.
+- **Shadow DOM support** — snapshots, refs, selectors, scrolling, waits and typing cross open shadow
+  roots, so app controls such as LinkedIn's post composer do not disappear after a click.
 - **Background-first** — task tabs never steal focus unless the agent is explicitly asked to show you.
 - **A visible cursor** on the page, labelled with the acting agent's name, so you can see what is
   happening and who is doing it.
@@ -168,6 +170,30 @@ This works because every request carries an opaque session id alongside the name
 process id. It is stable across CLI invocations from the same shell, so a session keeps its name for
 as long as it is in use.
 
+### Agents are locked to their group
+
+Separate names are not enough on their own, because attached tabs are shared state. So the tab group
+is not just a label — it is the boundary an agent works inside, and Latch enforces it:
+
+- A command with no `tabId` resolves only to an attached tab in the caller's own group. It never
+  falls through to whichever tab happens to be in the foreground.
+- Naming a `tabId` outside your group fails with `TAB_NOT_IN_YOUR_GROUP`, which names the owning
+  agent when there is one.
+- `browser_open` reuses only tabs you already own. A matching URL in the user's tabs or another
+  agent's group is left alone and you get your own tab instead, so it is always safe to call.
+- `browser_attach` brings a tab of the user's into your group, but is refused for a tab another live
+  agent is driving. `browser_detach` and `browser_close_tab` reach only your own group.
+
+**The group is the record of ownership**, not a map kept beside it. That has two useful
+consequences. Ownership survives a service-worker restart, because it is read back off the group
+title. And the user stays in charge: drag a tab from one agent's group into another's and it changes
+hands; drag it out of every agent group and it is detached, because it has left every workspace.
+
+Attaching from the toolbar popup is a person acting directly, so it takes a tab over regardless. A
+tab whose owning session has been quiet for 30 minutes can be adopted by another agent through an
+explicit `browser_attach` — which moves it into the new group — so an abandoned session never
+strands its tabs, but no agent ever silently starts driving another's.
+
 A name is released once its session has been quiet for 30 minutes **and** holds no attached tabs, so
 the plain name comes back for the next agent instead of being locked away. `browser_status` reports
 the name a caller is actually using.
@@ -247,7 +273,7 @@ using a real scroll container, a genuine wheel event is sent before giving up.
 | `browser_console` | Read console messages and JavaScript errors |
 | `browser_network` | Read recent requests and response status |
 | `browser_evaluate` | Run JavaScript in an attached tab |
-| `browser_open` | Reuse a matching own tab before creating one |
+| `browser_open` | Reuse a tab you own before creating one, inside your group |
 | `browser_new_tab` / `browser_close_tab` | Force a separate tab, or close an attached one |
 
 Every tool accepts an optional `agent` parameter.

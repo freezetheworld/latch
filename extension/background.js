@@ -460,32 +460,37 @@ function agentForGroupId(groupId) {
   return null;
 }
 
+/** The agent whose group a tab currently sits in, from the group alone. */
+async function agentOwningGroup(tab) {
+  if (typeof tab?.groupId !== "number" || tab.groupId < 0) return null;
+  const byId = agentForGroupId(tab.groupId);
+  if (byId) return byId;
+  try {
+    return knownAgentFromGroupTitle((await chrome.tabGroups.get(tab.groupId)).title);
+  } catch {
+    // The group disappeared while it was being inspected.
+    return null;
+  }
+}
+
 /**
- * Which agent owns a tab. Falls back to the title of the tab's group so
- * ownership survives a service-worker restart, which empties tabAgents.
+ * Which agent owns a tab. The tab's group decides, so a tab dragged from one
+ * agent's group to another changes hands instead of keeping a stale claim, and
+ * ownership survives a service-worker restart, which empties `tabAgents`.
+ * Only an ungrouped tab falls back to the recorded owner, because grouping can
+ * legitimately fail for pinned and otherwise special tabs.
  */
 async function agentForTab(tab) {
   if (!tab?.id) return null;
-  const known = tabAgents.get(tab.id);
-  if (known) return known;
-  const byGroup = agentForGroupId(tab.groupId);
+  const byGroup = await agentOwningGroup(tab);
   if (byGroup) {
     tabAgents.set(tab.id, byGroup);
     return byGroup;
   }
-  if (typeof tab.groupId === "number" && tab.groupId >= 0) {
-    try {
-      const group = await chrome.tabGroups.get(tab.groupId);
-      const titled = knownAgentFromGroupTitle(group.title);
-      if (titled) {
-        tabAgents.set(tab.id, titled);
-        return titled;
-      }
-    } catch {
-      // The group disappeared; the tab simply has no agent.
-    }
-  }
-  return null;
+  // Sitting in a group that belongs to no agent means the tab has left every
+  // agent workspace, whoever used to hold it.
+  if (typeof tab.groupId === "number" && tab.groupId >= 0) return null;
+  return tabAgents.get(tab.id) ?? null;
 }
 
 async function getAgentGroup(groupId, windowId, agent) {
@@ -569,7 +574,61 @@ async function clearTabOwnership(tabId, reason) {
   }
 }
 
-async function resolveAttachedTabId(requestedTabId) {
+// --- The group lock -------------------------------------------------------
+// Attached tabs are global state, so a name alone does not keep two sessions
+// apart: both reach for "the active attached tab" and end up driving — and
+// regrouping — each other's tabs, which collapses two agents into one group.
+// The tab group is therefore the boundary an agent works inside. A tab is
+// workable by an agent only while it sits in that agent's group, and the group
+// is the record of ownership rather than a map kept alongside it, so the user
+// moving a tab between groups moves it between agents.
+
+/** Whether a session holding `name` has been active recently enough to matter. */
+function agentIsLive(name) {
+  for (const entry of agentSessions.values()) {
+    if (entry.name === name && Date.now() - (entry.lastSeen ?? 0) < SESSION_IDLE_MS) return true;
+  }
+  return false;
+}
+
+/** The agent whose group holds this tab, or null when no agent's does. */
+async function ownerOfTab(tabId) {
+  try {
+    // Deliberately not short-circuited on `tabAgents`: the tab's group is what
+    // decides, and the cache is exactly what goes stale when a tab is moved.
+    return await agentForTab(await chrome.tabs.get(tabId));
+  } catch {
+    return tabAgents.get(tabId) ?? null;
+  }
+}
+
+/**
+ * The owner standing between `agent` and a tab, or null when the tab is free to
+ * use. A tab whose owner has gone quiet is not defended, so an abandoned
+ * session never strands its tabs.
+ */
+async function blockingOwner(tabId, agent) {
+  if (!agent) return null;
+  const owner = await ownerOfTab(tabId);
+  if (!owner || owner === agent || !agentIsLive(owner)) return null;
+  return owner;
+}
+
+function foreignTabError(tabId, owner) {
+  return browserError(
+    "TAB_NOT_IN_YOUR_GROUP",
+    owner
+      ? `Tab ${tabId} is in the “${owner}” tab group. Work only inside your own group: open your own tab with browser_open.`
+      : `Tab ${tabId} is not in your tab group. Work only inside your own group: open your own tab with browser_open.`,
+  );
+}
+
+/**
+ * The tab a command acts on, which is always one inside the caller's own group.
+ * Passing no agent skips the check, for the popup and for Latch's own internal
+ * cleanup, which act on the user's behalf rather than an agent's.
+ */
+async function resolveAttachedTabId(requestedTabId, agent = null) {
   if (requestedTabId !== undefined && requestedTabId !== null) {
     if (!attachedTabs.has(requestedTabId)) {
       throw browserError(
@@ -577,19 +636,30 @@ async function resolveAttachedTabId(requestedTabId) {
         `Tab ${requestedTabId} is not attached. Attach it from the Latch toolbar popup first.`,
       );
     }
+    if (agent) {
+      const owner = await ownerOfTab(requestedTabId);
+      if (owner !== agent) throw foreignTabError(requestedTabId, owner);
+    }
     return requestedTabId;
   }
 
+  const usable = [];
+  for (const tabId of attachedTabs) {
+    if (!agent || (await ownerOfTab(tabId)) === agent) usable.push(tabId);
+  }
+
   const activeTab = await currentTab();
-  if (activeTab && attachedTabs.has(activeTab.id)) {
+  if (activeTab && usable.includes(activeTab.id)) {
     return activeTab.id;
   }
-  if (attachedTabs.size === 1) {
-    return [...attachedTabs][0];
+  if (usable.length === 1) {
+    return usable[0];
   }
   throw browserError(
     "NO_ACTIVE_ATTACHED_TAB",
-    "No active attached tab. Open the Latch toolbar popup and attach the tab you want the agent to use.",
+    usable.length
+      ? "Several tabs in your group are attached. Pass the tabId of the one to use."
+      : "Your tab group has no attached tab. Open one with browser_open and work inside your group.",
   );
 }
 
@@ -597,7 +667,7 @@ async function sendDebuggerCommand(tabId, method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params);
 }
 
-async function attachTabOnce(requestedTabId, agent = DEFAULT_AGENT_NAME) {
+async function attachTabOnce(requestedTabId, agent = DEFAULT_AGENT_NAME, { takeover = false } = {}) {
   const tabId = requestedTabId ?? (await currentTab())?.id;
   if (!tabId) {
     throw browserError("TAB_NOT_FOUND", "No active Chrome tab was found.");
@@ -606,6 +676,12 @@ async function attachTabOnce(requestedTabId, agent = DEFAULT_AGENT_NAME) {
   const tab = await chrome.tabs.get(tabId);
   if (!isControllableUrl(tab.url)) {
     throw browserError("UNSUPPORTED_PAGE", "Chrome internal pages and extension pages cannot be controlled.");
+  }
+  // Attaching regroups the tab and rewrites its owner, so it is the point where
+  // one agent would otherwise pull another agent's tab into its own group.
+  if (!takeover) {
+    const owner = await blockingOwner(tabId, agent);
+    if (owner) throw foreignTabError(tabId, owner);
   }
   if (!attachedTabs.has(tabId)) {
     try {
@@ -631,10 +707,12 @@ async function attachTabOnce(requestedTabId, agent = DEFAULT_AGENT_NAME) {
   }
 
   let groupId = null;
+  tabAgents.set(tabId, agent);
   try {
     groupId = await ensureAgentGroup(tabId, agent);
   } catch {
-    // Pinned and special tabs cannot always be grouped; control still works.
+    // Pinned and special tabs cannot always be grouped. Control still works,
+    // and the recorded owner above keeps the tab reachable by its own agent.
   }
 
   const current = await chrome.tabs.get(tabId);
@@ -649,30 +727,39 @@ async function attachTabOnce(requestedTabId, agent = DEFAULT_AGENT_NAME) {
   return { tabId, title: current.title, url: current.url, attached: true, agent, groupId };
 }
 
-async function attachTab(requestedTabId, agent = DEFAULT_AGENT_NAME) {
+async function attachTab(requestedTabId, agent = DEFAULT_AGENT_NAME, { takeover = false } = {}) {
   const tabId = requestedTabId ?? (await currentTab())?.id;
   if (!tabId) {
     throw browserError("TAB_NOT_FOUND", "No active Chrome tab was found.");
   }
   const existing = attachingTabs.get(tabId);
   if (existing) {
-    return existing;
+    // An attach already in flight has no recorded owner yet, so the pending
+    // agent is what a second agent has to be checked against.
+    if (!takeover && existing.agent !== agent && agentIsLive(existing.agent)) {
+      throw foreignTabError(tabId, existing.agent);
+    }
+    return existing.operation;
   }
   rememberAgent(agent);
   setAgentStatus(agent, "connected");
-  const operation = attachTabOnce(tabId, agent);
-  attachingTabs.set(tabId, operation);
+  const operation = attachTabOnce(tabId, agent, { takeover });
+  attachingTabs.set(tabId, { agent, operation });
   try {
     return await operation;
   } finally {
-    if (attachingTabs.get(tabId) === operation) {
+    if (attachingTabs.get(tabId)?.operation === operation) {
       attachingTabs.delete(tabId);
     }
   }
 }
 
-async function detachTab(requestedTabId, reason = "Detached by user") {
-  const tabId = requestedTabId ?? (await resolveAttachedTabId());
+async function detachTab(requestedTabId, reason = "Detached by user", agent = null) {
+  const tabId = requestedTabId ?? (await resolveAttachedTabId(undefined, agent));
+  if (agent) {
+    const owner = await ownerOfTab(tabId);
+    if (owner !== agent) throw foreignTabError(tabId, owner);
+  }
   if (attachedTabs.has(tabId)) {
     requestedDetachReasons.set(tabId, reason);
     await removeLatchCursor(tabId);
@@ -711,7 +798,38 @@ function functionExpression(fn, ...args) {
     const serialized = JSON.stringify(argument);
     return serialized === undefined ? "undefined" : serialized;
   });
-  return `(${fn.toString()})(${serializedArgs.join(",")})`;
+  // Page helpers normally stop at a shadow-root boundary. Modern web apps
+  // increasingly put their real controls there (LinkedIn's post composer is
+  // one example), so every injected page function gets shadow-aware query and
+  // text helpers. Closed roots remain intentionally inaccessible. Latch's own
+  // cursor root is skipped so it never appears in snapshots or wait results.
+  return `(() => {
+    const __latchOpenRoots = () => {
+      const roots = [document];
+      for (let index = 0; index < roots.length; index += 1) {
+        for (const element of roots[index].querySelectorAll("*")) {
+          if (element.shadowRoot && element.dataset?.latchCursor !== "true") {
+            roots.push(element.shadowRoot);
+          }
+        }
+      }
+      return roots;
+    };
+    const querySelectorAllDeep = (selector) => {
+      const matches = [];
+      for (const root of __latchOpenRoots()) matches.push(...root.querySelectorAll(selector));
+      return matches;
+    };
+    const querySelectorDeep = (selector) => querySelectorAllDeep(selector)[0] ?? null;
+    const innerTextDeep = () => __latchOpenRoots().map((root) => {
+      if (root === document) return document.body?.innerText ?? "";
+      return [...(root.children ?? [])]
+        .filter((element) => !["STYLE", "SCRIPT", "TEMPLATE"].includes(element.tagName))
+        .map((element) => element.innerText ?? element.textContent ?? "")
+        .join("\\n");
+    }).filter(Boolean).join("\\n");
+    return (${fn.toString()})(${serializedArgs.join(",")});
+  })()`;
 }
 
 function renderLatchCursor(elementId, state) {
@@ -1074,7 +1192,7 @@ function snapshotPage(maxElements, refAttribute) {
     );
   };
 
-  document.querySelectorAll(`[${refAttribute}]`).forEach((element) => element.removeAttribute(refAttribute));
+  querySelectorAllDeep(`[${refAttribute}]`).forEach((element) => element.removeAttribute(refAttribute));
   const selector = [
     "a[href]",
     "button",
@@ -1086,7 +1204,7 @@ function snapshotPage(maxElements, refAttribute) {
     "[contenteditable='true']",
     "[tabindex]:not([tabindex='-1'])",
   ].join(",");
-  const candidates = [...document.querySelectorAll(selector)].filter(isVisible).slice(0, maxElements);
+  const candidates = querySelectorAllDeep(selector).filter(isVisible).slice(0, maxElements);
   const elements = candidates.map((element, index) => {
     const ref = `e${index + 1}`;
     element.setAttribute(refAttribute, ref);
@@ -1137,7 +1255,7 @@ function snapshotPage(maxElements, refAttribute) {
   const page = document.scrollingElement || document.documentElement;
   const scrollers = [];
   let scrollerIndex = 0;
-  for (const element of document.querySelectorAll("*")) {
+  for (const element of querySelectorAllDeep("*")) {
     const style = getComputedStyle(element);
     const scrollsDown = overflows(style.overflowY) && element.scrollHeight > element.clientHeight + 1;
     const scrollsAcross = overflows(style.overflowX) && element.scrollWidth > element.clientWidth + 1;
@@ -1164,7 +1282,7 @@ function snapshotPage(maxElements, refAttribute) {
   scrollers.sort((a, b) => b.area - a.area);
   scrollers.forEach((entry) => delete entry.area);
 
-  const fullText = String(document.body?.innerText ?? "");
+  const fullText = String(innerTextDeep());
   return {
     url: location.href,
     title: document.title,
@@ -1180,8 +1298,8 @@ function snapshotPage(maxElements, refAttribute) {
   };
 }
 
-async function browserSnapshot(params) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+async function browserSnapshot(params, agent = DEFAULT_AGENT_NAME) {
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const maxElements = Math.min(Math.max(params.maxElements ?? 200, 1), 500);
   const snapshot = await evaluate(tabId, functionExpression(snapshotPage, maxElements, REF_ATTRIBUTE));
   recordActivity(
@@ -1211,7 +1329,7 @@ function scrollPage(request, refAttribute) {
     let best = null;
     let bestArea = 0;
     const overflows = (value) => value === "auto" || value === "scroll" || value === "overlay";
-    for (const element of document.querySelectorAll("*")) {
+    for (const element of querySelectorAllDeep("*")) {
       const style = getComputedStyle(element);
       const scrollsDown = overflows(style.overflowY) && canScrollY(element);
       const scrollsAcross = overflows(style.overflowX) && canScrollX(element);
@@ -1237,7 +1355,7 @@ function scrollPage(request, refAttribute) {
     const selector = request.ref
       ? `[${refAttribute}="${CSS.escape(request.ref)}"]`
       : request.selector;
-    target = document.querySelector(selector);
+    target = querySelectorDeep(selector);
     if (!target) throw new Error(`Element not found: ${selector}`);
     // A scrollable element the caller names is scrolled itself. Anything else
     // is brought into view inside whichever container holds it.
@@ -1309,7 +1427,7 @@ function locateElement(target, refAttribute) {
   if (!selector) {
     throw new Error("Provide an element ref from browser_snapshot or a CSS selector.");
   }
-  const element = document.querySelector(selector);
+  const element = querySelectorDeep(selector);
   if (!element) {
     throw new Error(`Element not found: ${selector}`);
   }
@@ -1326,7 +1444,7 @@ function locateElement(target, refAttribute) {
 }
 
 async function browserClick(params, agent = DEFAULT_AGENT_NAME) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const point = await evaluate(
     tabId,
     functionExpression(locateElement, { ref: params.ref, selector: params.selector }, REF_ATTRIBUTE),
@@ -1370,7 +1488,7 @@ async function browserClick(params, agent = DEFAULT_AGENT_NAME) {
  * wheel event is sent as a second attempt rather than silently doing nothing.
  */
 async function browserScroll(params, agent = DEFAULT_AGENT_NAME) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const to = String(params.to ?? params.direction ?? "down").toLowerCase();
   const request = { ref: params.ref, selector: params.selector, to, amount: params.amount };
   let result = await evaluate(tabId, functionExpression(scrollPage, request, REF_ATTRIBUTE));
@@ -1443,7 +1561,7 @@ async function browserScroll(params, agent = DEFAULT_AGENT_NAME) {
 function focusElement(target, refAttribute, clear) {
   const selector = target.ref ? `[${refAttribute}="${CSS.escape(target.ref)}"]` : target.selector;
   if (!selector) throw new Error("Provide an element ref from browser_snapshot or a CSS selector.");
-  const element = document.querySelector(selector);
+  const element = querySelectorDeep(selector);
   if (!element) throw new Error(`Element not found: ${selector}`);
   element.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   element.focus();
@@ -1478,7 +1596,7 @@ function focusElement(target, refAttribute, clear) {
 }
 
 async function browserType(params, agent = DEFAULT_AGENT_NAME) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const target = await evaluate(
     tabId,
     functionExpression(
@@ -1523,7 +1641,7 @@ const KEY_CODES = {
 };
 
 async function browserPressKey(params, agent = DEFAULT_AGENT_NAME) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const key = params.key;
   const definition = KEY_CODES[key] ?? {
     code: key.length === 1 ? `Key${key.toUpperCase()}` : key,
@@ -1614,7 +1732,7 @@ async function waitForControllableTab(tabId, timeoutMs) {
 }
 
 async function browserNavigate(params, agent = DEFAULT_AGENT_NAME) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   if (!isControllableUrl(params.url)) {
     throw browserError("UNSUPPORTED_PAGE", "Chrome internal pages and extension pages cannot be controlled.");
   }
@@ -1628,20 +1746,20 @@ async function browserNavigate(params, agent = DEFAULT_AGENT_NAME) {
 
 function pageContains(selector, text) {
   if (selector) {
-    const element = document.querySelector(selector);
+    const element = querySelectorDeep(selector);
     if (!element) return false;
     const rect = element.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) return false;
   }
-  if (text && !document.body?.innerText.includes(text)) return false;
+  if (text && !innerTextDeep().includes(text)) return false;
   return Boolean(selector || text);
 }
 
-async function browserWaitFor(params) {
+async function browserWaitFor(params, agent = DEFAULT_AGENT_NAME) {
   if (!params.selector && !params.text) {
     throw browserError("INVALID_TARGET", "Provide a selector or text to wait for.");
   }
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const timeoutMs = params.timeoutMs ?? 10_000;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() <= deadline) {
@@ -1654,8 +1772,8 @@ async function browserWaitFor(params) {
   throw browserError("WAIT_TIMEOUT", `Page condition was not met within ${timeoutMs}ms.`);
 }
 
-async function browserScreenshot(params) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+async function browserScreenshot(params, agent = DEFAULT_AGENT_NAME) {
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const captureParams = { format: "png", captureBeyondViewport: Boolean(params.fullPage) };
   if (params.fullPage) {
     const metrics = await sendDebuggerCommand(tabId, "Page.getLayoutMetrics");
@@ -1680,8 +1798,8 @@ async function browserScreenshot(params) {
   };
 }
 
-async function browserConsole(params) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+async function browserConsole(params, agent = DEFAULT_AGENT_NAME) {
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const messages = [...(consoleMessages.get(tabId) ?? [])];
   if (params.clear) {
     consoleMessages.set(tabId, []);
@@ -1689,8 +1807,8 @@ async function browserConsole(params) {
   return { tabId, messages };
 }
 
-async function browserNetwork(params) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+async function browserNetwork(params, agent = DEFAULT_AGENT_NAME) {
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   const entries = [...(networkEntries.get(tabId)?.values() ?? [])];
   if (params.clear) {
     networkEntries.set(tabId, new Map());
@@ -1699,7 +1817,7 @@ async function browserNetwork(params) {
 }
 
 async function browserEvaluate(params, agent = DEFAULT_AGENT_NAME) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   await showLatchCursor(tabId, { agent, label: `${agent} · Running`, status: "working", durationMs: 1_000 });
   const value = await evaluate(tabId, params.expression, { awaitPromise: true });
   recordActivity("evaluate", "Evaluated JavaScript", { tabId });
@@ -1759,11 +1877,8 @@ function comparableUrl(url) {
   }
 }
 
-/** Only reuse a tab the same agent already owns, never another agent's. */
+/** Only reuse a tab sitting in this agent's own group, never anyone else's. */
 async function tabBelongsToAgent(tab, agent) {
-  if (attachedTabs.has(tab.id) && tabAgents.get(tab.id) === agent) {
-    return true;
-  }
   return (await agentForTab(tab)) === agent;
 }
 
@@ -1782,9 +1897,18 @@ async function browserOpen(params, agent = DEFAULT_AGENT_NAME) {
   if (params.reuseExisting !== false) {
     const tabs = (await chrome.tabs.query({})).filter((tab) => isControllableUrl(tab.url));
     const exactUrl = comparableUrl(url);
-    let selected = tabs
+    // Only tabs already in this agent's group are reuse candidates. A matching
+    // URL is not a claim on someone else's tab, or on one of the user's.
+    const exactMatches = tabs
       .filter((tab) => comparableUrl(tab.url) === exactUrl)
-      .sort((left, right) => Number(attachedTabs.has(right.id)) - Number(attachedTabs.has(left.id)))[0];
+      .sort((left, right) => Number(attachedTabs.has(right.id)) - Number(attachedTabs.has(left.id)));
+    let selected = null;
+    for (const candidate of exactMatches) {
+      if (await tabBelongsToAgent(candidate, agent)) {
+        selected = candidate;
+        break;
+      }
+    }
 
     if (!selected && params.reuseSiteTab !== false) {
       const requestedOrigin = originForUrl(url);
@@ -1807,7 +1931,7 @@ async function browserOpen(params, agent = DEFAULT_AGENT_NAME) {
           tabId: selected.id,
           url,
           timeoutMs: params.timeoutMs ?? 20_000,
-        });
+        }, agent);
         return { opened: false, reused: true, ...attached, ...navigated };
       }
       recordActivity("tab", `Reused ${selected.url}`, { tabId: selected.id });
@@ -1853,8 +1977,8 @@ async function browserNewTab(params, agent = DEFAULT_AGENT_NAME) {
   }
 }
 
-async function browserCloseTab(params) {
-  const tabId = await resolveAttachedTabId(params.tabId);
+async function browserCloseTab(params, agent = DEFAULT_AGENT_NAME) {
+  const tabId = await resolveAttachedTabId(params.tabId, agent);
   await chrome.tabs.remove(tabId);
   attachedTabs.delete(tabId);
   consoleMessages.delete(tabId);
@@ -1896,7 +2020,7 @@ async function dispatchBrowserCommand(method, params) {
     browser_status: browserStatus,
     browser_tabs: browserTabs,
     browser_attach: ({ tabId }) => attachTab(tabId, agent),
-    browser_detach: ({ tabId }) => detachTab(tabId),
+    browser_detach: ({ tabId }) => detachTab(tabId, "Detached by agent", agent),
     browser_snapshot: browserSnapshot,
     browser_scroll: browserScroll,
     browser_navigate: browserNavigate,
@@ -2075,9 +2199,40 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   tabAgents.delete(tabId);
 });
 
+/**
+ * Reconcile an attached tab with the group it now sits in. Dragging a tab from
+ * one agent's group to another hands it over; dragging it out of every agent
+ * group detaches it, so no agent keeps driving a tab outside its workspace.
+ */
+async function reconcileTabGroup(tabId) {
+  // An attach in flight is mid-way through creating and titling its group, so
+  // the group legitimately looks nameless for a moment.
+  if (attachingTabs.has(tabId)) return;
+  let owner;
+  try {
+    owner = await agentOwningGroup(await chrome.tabs.get(tabId));
+  } catch {
+    return;
+  }
+  const recorded = tabAgents.get(tabId) ?? null;
+  if (owner === recorded) return;
+  if (owner) {
+    tabAgents.set(tabId, owner);
+    rememberAgent(owner);
+    setAgentStatus(owner, "connected");
+    recordActivity("tab", `Moved into the ${owner} group`, { tabId, agent: owner });
+    return;
+  }
+  await detachTab(tabId, "Detached after being moved out of its agent group");
+}
+
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (attachedTabs.has(tabId) && changeInfo.url && !isControllableUrl(changeInfo.url)) {
     void detachTab(tabId, "Detached because Chrome does not allow control of this page");
+    return;
+  }
+  if (attachedTabs.has(tabId) && changeInfo.groupId !== undefined) {
+    void reconcileTabGroup(tabId);
     return;
   }
   if (!attachedTabs.has(tabId) && changeInfo.groupId !== undefined) {
@@ -2153,7 +2308,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     ui_attach: async ({ tabId, agent }) => {
       await hydrateAgentSessions();
       const name = claimAgentName(normalizeAgentName(agent) ?? "Me", "ui:popup");
-      return attachTab(tabId, name);
+      return attachTab(tabId, name, { takeover: true });
     },
     ui_detach: ({ tabId }) => detachTab(tabId),
     ui_retry_connection: async () => {

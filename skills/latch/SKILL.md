@@ -25,28 +25,54 @@ instead — ask for `Claude Code` while another Claude Code is running and you b
 Call `browser_status` to see the name you actually hold, and use that name when you tell the user
 which tab group is yours. Do not try to take the plain name back.
 
-## Tab ownership and reuse
+## Work inside your own tab group
 
-Before opening any page, call `browser_tabs`. Reuse the relevant existing tab whenever possible.
+Your tab group is your workspace, and it is the only place you can work. Everything you open goes
+into it, every command you run acts on a tab inside it, and tabs outside it are not available to you
+— not the user's tabs, and not another agent's. Latch enforces this rather than trusting you to
+remember it, so you cannot collide with another session even when you both call yourself the same
+thing.
 
-Use `browser_open` for URLs. It follows this order:
+Use `browser_open` for URLs. It works entirely inside your group:
 
-1. Reuse an exact URL match.
-2. Reuse a tab you already own on the same site and navigate it.
-3. Create a tab only when neither exists.
+1. Reuse a tab you already own on that exact URL.
+2. Otherwise reuse a tab you already own on the same site, and navigate it.
+3. Otherwise open a new tab, inside your group.
 
-Do not use `browser_new_tab` unless the user explicitly asks for another or separate tab. Never open a duplicate merely because the existing tab is not currently attached; attach and reuse it.
+Because it never reaches outside your group, `browser_open` is always safe to call. Do not call
+`browser_tabs` first to hunt for a tab to take over — a tab of the user's on the URL you want is
+still not yours, and `browser_open` will correctly open your own instead of stealing it. Use
+`browser_tabs` to report on what is open, not to pick a tab to seize.
+
+Do not use `browser_new_tab` unless the user explicitly asks for another or separate tab.
 
 Keep `active=false` for normal work so Chrome stays in the background. Set `active=true` only when the user explicitly asks to see, open in front, or switch to the page. Browser work must not use macOS screen capture, Accessibility, AppleScript, or desktop input automation.
 
 The group title also carries your live status, as an emoji and a word — `Codex · ⏳ Working`,
 then `Codex · ✅ Done`. Latch sets that from the command you are running; you do not manage it.
 
-Your tabs belong in the tab group named after you. Tabs opened by a controlled page are adopted into that same group automatically. Never reuse, adopt, or move tabs that belong to another agent's group, and never move unrelated user tabs into yours.
+Tabs opened by a page you control are adopted into your group automatically, so a link that opens in
+a new tab stays inside your workspace.
+
+What the lock means in practice:
+
+- A command with no `tabId` resolves only to an attached tab in your group. It will never fall
+  through to whichever tab happens to be in the foreground.
+- Naming a `tabId` outside your group fails with `TAB_NOT_IN_YOUR_GROUP`, and the message names the
+  owning agent when there is one. Do not retry it and do not try to attach it: open your own tab
+  with `browser_open` instead.
+- The group is the record of ownership, so if the user drags one of your tabs into another agent's
+  group, that tab becomes theirs; drag it out of every agent group and it is detached. Either way
+  you will start getting `TAB_NOT_IN_YOUR_GROUP` on it. That is the user reassigning the tab, not an
+  error to work around.
+- `browser_attach` is for bringing a tab of the user's into your group. It is refused for a tab
+  another live agent is driving.
 
 ## Page actions
 
 - Use `browser_snapshot` before interacting and prefer its element refs for clicks and typing.
+- Snapshots and element refs cross open shadow roots, so keep using them when an app opens a modal
+  or editor inside Shadow DOM; no site-specific JavaScript workaround should be needed.
 - Use `browser_wait_for` after actions that load or update UI.
 - `elements` only ever describes what is on screen. Check `scroll` in the snapshot before concluding
   a page has no more content, and `textTruncated` before concluding you have read all of it.

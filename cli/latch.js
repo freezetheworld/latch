@@ -33,7 +33,8 @@ Options:
   --agent NAME      Name this agent. Becomes the title of the Chrome tab group
                     holding its tabs, so several agents can share one profile.
                     Defaults to $LATCH_AGENT, then an auto-detected name.
-  --tab-id N        Chrome tab ID (uses active attached tab if omitted)
+  --tab-id N        Chrome tab ID, in this agent's own tab group (uses the active
+                    attached tab in that group if omitted)
   --ref eN          Element reference from snapshot (e.g. e12)
   --selector CSS    CSS selector
   --max-elements N  Max elements in snapshot (default 200, max 500)

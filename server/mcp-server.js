@@ -103,7 +103,8 @@ const optionalAgent = z
       "holding this agent's tabs, so several agents can share one Chrome profile. " +
       "Defaults to $LATCH_AGENT, then to an auto-detected name. If another live " +
       "session already holds that name, this one is given a callsign variant of " +
-      "it instead; browser_status reports the name actually in use.",
+      "it instead; browser_status reports the name actually in use. You work only " +
+      "inside your own tab group: tabs in another group are not yours to use.",
   );
 
 /**
@@ -127,10 +128,19 @@ function registerBrowserTool(name, definition, method = name) {
   });
 }
 
-const optionalTabId = z.number().int().positive().optional().describe("Chrome tab ID. Omit to use the active attached tab.");
+const optionalTabId = z
+  .number()
+  .int()
+  .positive()
+  .optional()
+  .describe(
+    "Chrome tab ID, which must be a tab in your own tab group. Omit to use the active " +
+      "attached tab in your group. A tab in another agent's group, or in none, fails with " +
+      "TAB_NOT_IN_YOUR_GROUP; open your own tab with browser_open instead of retrying.",
+  );
 const optionalTarget = {
   ref: z.string().optional().describe("Element reference from browser_snapshot, such as e12."),
-  selector: z.string().optional().describe("CSS selector. Prefer a snapshot ref when available."),
+  selector: z.string().optional().describe("CSS selector, including inside open shadow roots. Prefer a snapshot ref when available."),
 };
 
 registerBrowserTool("browser_status", {
@@ -147,20 +157,24 @@ registerBrowserTool("browser_tabs", {
 
 registerBrowserTool("browser_attach", {
   title: "Attach a Chrome tab",
-  description: "Attach this agent to any normal web tab so it can inspect and control that tab.",
+  description:
+    "Attach this agent to a normal web tab, moving it into this agent's tab group so it can be " +
+    "inspected and controlled. Attaching a tab another live agent is driving is refused; prefer " +
+    "browser_open, which opens inside your group without touching anyone else's tabs.",
   inputSchema: { tabId: optionalTabId },
 });
 
 registerBrowserTool("browser_detach", {
   title: "Detach a Chrome tab",
-  description: "Stop controlling a Chrome tab.",
+  description: "Stop controlling a Chrome tab. Only tabs in this agent's own group can be detached.",
   inputSchema: { tabId: optionalTabId },
 });
 
 registerBrowserTool("browser_snapshot", {
   title: "Read page state",
   description:
-    "Read the current URL, title, visible text, and visible interactive elements. " +
+    "Read the current URL, title, visible text, and visible interactive elements, including " +
+    "content inside open shadow roots. " +
     "Interactive elements receive refs that can be passed to click and type tools.",
   inputSchema: {
     tabId: optionalTabId,
@@ -308,7 +322,9 @@ registerBrowserTool("browser_evaluate", {
 registerBrowserTool("browser_open", {
   title: "Open or reuse a Chrome tab",
   description:
-    "Open a URL while preferring an existing exact-match tab or a tab this same agent already owns on the same site. " +
+    "Open a URL inside this agent's own tab group, reusing a tab this agent already owns on that " +
+    "URL or that site before creating one. Tabs belonging to the user or to another agent are " +
+    "never reused, so this is always safe to call. " +
     "Use this instead of browser_new_tab unless the user explicitly asks for a separate tab.",
   inputSchema: {
     url: z.string().url(),
