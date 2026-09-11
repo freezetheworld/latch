@@ -4,7 +4,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import process from "node:process";
-import { bridgeDirectory, bridgeSocketPath, NATIVE_HOST_NAME } from "./bridge-path.js";
+import { bridgeDirectory, bridgeSocketPath, isWindows, NATIVE_HOST_NAME } from "./bridge-path.js";
 import {
   encodeJsonLine,
   encodeNativeMessage,
@@ -135,7 +135,10 @@ async function socketIsActive(candidatePath) {
 
 fs.mkdirSync(bridgeDirectory(), { recursive: true, mode: 0o700 });
 fs.chmodSync(bridgeDirectory(), 0o700);
-if (fs.existsSync(socketPath)) {
+// Named pipes on Windows live outside the filesystem: there is no file to
+// stat, chmod, or unlink, and a stale pipe cannot linger once its owning
+// process exits, so the POSIX stale-socket cleanup below does not apply.
+if (!isWindows() && fs.existsSync(socketPath)) {
   if (await socketIsActive(socketPath)) {
     log(`Another bridge is already listening at ${socketPath}`);
     process.exit(1);
@@ -145,11 +148,18 @@ if (fs.existsSync(socketPath)) {
 
 const server = net.createServer(handleClient);
 server.on("error", (error) => {
+  if (isWindows() && error.code === "EADDRINUSE") {
+    log(`Another bridge is already listening at ${socketPath}`);
+    shutdown(1);
+    return;
+  }
   log(`Socket server failed: ${error.message}`);
   shutdown(1);
 });
 server.listen(socketPath, () => {
-  fs.chmodSync(socketPath, 0o600);
+  if (!isWindows()) {
+    fs.chmodSync(socketPath, 0o600);
+  }
   writeNative({
     type: "host_ready",
     host: NATIVE_HOST_NAME,
@@ -170,7 +180,7 @@ function shutdown(exitCode) {
   }
   pending.clear();
   server.close(() => {
-    if (fs.existsSync(socketPath)) {
+    if (!isWindows() && fs.existsSync(socketPath)) {
       fs.unlinkSync(socketPath);
     }
     process.exit(exitCode);

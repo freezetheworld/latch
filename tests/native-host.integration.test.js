@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { bridgeSocketPath } from "../server/bridge-path.js";
 import {
   encodeJsonLine,
   encodeNativeMessage,
@@ -26,7 +27,18 @@ function withTimeout(promise, timeoutMs, message) {
 test("native host relays a socket request to Chrome and its response back", async (context) => {
   // Keep the Unix-socket path short and allocate it inside the process-scoped temp root.
   const testDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "cbb-test-"));
-  const socketPath = path.join(testDirectory, "bridge.sock");
+  // bridgeSocketPath() reads LATCH_HOME from the environment at call time, so
+  // toggling it here (matching the child's env below) gives the exact path the
+  // child will listen on, on every platform, instead of assuming a POSIX
+  // socket-file layout the child may not use (e.g. a Windows named pipe).
+  const previousLatchHome = process.env.LATCH_HOME;
+  process.env.LATCH_HOME = testDirectory;
+  const socketPath = bridgeSocketPath();
+  if (previousLatchHome === undefined) {
+    delete process.env.LATCH_HOME;
+  } else {
+    process.env.LATCH_HOME = previousLatchHome;
+  }
   const child = spawn(process.execPath, [path.join(projectRoot, "server", "native-host.js")], {
     env: { ...process.env, LATCH_HOME: testDirectory },
     stdio: ["pipe", "pipe", "pipe"],
@@ -82,7 +94,10 @@ test("native host relays a socket request to Chrome and its response back", asyn
     );
   }
   assert.equal(ready.protocolVersion, 1);
-  assert.equal(fs.existsSync(socketPath), true);
+  // Named pipes on Windows are not filesystem entries, unlike a Unix socket.
+  if (process.platform !== "win32") {
+    assert.equal(fs.existsSync(socketPath), true);
+  }
 
   const socket = net.createConnection(socketPath);
   const lineDecoder = new JsonLineDecoder();

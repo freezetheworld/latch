@@ -53,13 +53,23 @@ function removeExisting(destination) {
   return stats.isSymbolicLink() ? "link" : "copy";
 }
 
-function install(destination, source, { copy }) {
+export function install(destination, source, { copy, symlink = fs.symlinkSync } = {}) {
   const replaced = removeExisting(destination);
   fs.mkdirSync(path.dirname(destination), { recursive: true });
   if (copy) {
     fs.cpSync(source, destination, { recursive: true });
-  } else {
-    fs.symlinkSync(source, destination, fs.statSync(source).isDirectory() ? "dir" : "file");
+    return replaced ? "replaced" : "installed";
+  }
+  try {
+    symlink(source, destination, fs.statSync(source).isDirectory() ? "dir" : "file");
+  } catch (error) {
+    // Creating a symlink on Windows needs admin rights or Developer Mode
+    // (SeCreateSymbolicLinkPrivilege). Fall back to a copy rather than fail.
+    if (error.code !== "EPERM" && error.code !== "EACCES") {
+      throw error;
+    }
+    fs.cpSync(source, destination, { recursive: true });
+    return replaced ? "replaced (copy)" : "installed (copy)";
   }
   return replaced ? "replaced" : "installed";
 }
@@ -88,16 +98,27 @@ function main() {
   }
 
   // The skill tells agents to fall back to the `latch` command when MCP is not
-  // registered, so it needs to be on PATH for that advice to work.
+  // registered, so it needs to be on PATH for that advice to work. Windows
+  // shells resolve commands by extension, and cli/latch.js's shebang line does
+  // nothing there, so `latch` becomes a .cmd shim that shells out to node
+  // rather than a symlink to the script itself.
+  const isWindows = process.platform === "win32";
   const binDirectory = path.join(os.homedir(), ".local", "bin");
-  const binPath = path.join(binDirectory, "latch");
+  const binPath = path.join(binDirectory, isWindows ? "latch.cmd" : "latch");
   if (uninstall) {
     const removed = removeExisting(binPath);
     process.stdout.write(`  ${removed ? "removed  " : "absent   "} CLI: ${binPath}\n`);
   } else if (fs.existsSync(binDirectory) || force) {
     fs.mkdirSync(binDirectory, { recursive: true });
-    const action = install(binPath, cliSource, { copy: false });
-    fs.chmodSync(cliSource, 0o755);
+    let action;
+    if (isWindows) {
+      const replaced = removeExisting(binPath);
+      fs.writeFileSync(binPath, `@echo off\r\nnode "${cliSource}" %*\r\n`);
+      action = replaced ? "replaced" : "installed";
+    } else {
+      action = install(binPath, cliSource, { copy: false });
+      fs.chmodSync(cliSource, 0o755);
+    }
     process.stdout.write(`  ${action.padEnd(9)} CLI: ${binPath}\n`);
     if (!(process.env.PATH ?? "").split(path.delimiter).includes(binDirectory)) {
       process.stdout.write(`\n  Note: ${binDirectory} is not on your PATH.\n`);

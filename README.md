@@ -66,7 +66,7 @@ Everything is local. No cloud service, no remote browser, no account.
 
 ## Requirements
 
-- macOS or Linux
+- macOS, Linux, or Windows 10/11
 - Node.js 20 or newer
 - Google Chrome, Chrome Beta, or Chromium
 - At least one local agent (anything that speaks MCP, or any shell)
@@ -105,6 +105,14 @@ key or repackaged the extension, pass `--extension-id YOUR_ID`.
 
 > **macOS note:** the runtime is staged outside your checkout on purpose. Chrome's sandbox cannot
 > launch a host that lives in a privacy-protected folder such as `Documents` or `Desktop`.
+
+> **Windows note:** Chrome has no native-messaging config folder on Windows, so the installer
+> registers the host under `HKEY_CURRENT_USER\Software\<browser>\NativeMessagingHosts` instead — a
+> per-user registry key, so it still needs no administrator rights. The bridge itself listens on a
+> named pipe rather than a Unix socket; that is the only runtime difference and it is automatic.
+> `npm run install-skill` symlinks the agent skill by default, which needs Developer Mode
+> (`Settings > System > For developers`) or an elevated shell; without it, it falls back to copying
+> the skill instead, which still works, just without live edits.
 
 **4. Register the MCP server with your agents**
 

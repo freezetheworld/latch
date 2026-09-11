@@ -5,8 +5,12 @@ import {
   createLauncher,
   createHostManifest,
   extensionIdFromManifest,
+  install,
   installNativeHostRuntime,
+  manifestPath,
+  nativeHostLauncherPath,
   nativeMessagingDirectory,
+  nativeMessagingRegistryKey,
   parseArguments,
 } from "../scripts/install-native-host.js";
 import fs from "node:fs";
@@ -43,6 +47,7 @@ test("launcher pins the Node executable so Chrome does not depend on shell PATH"
       "/opt/local/bin/node",
       "/Users/tester/Latch/server/native-host.js",
       "/Users/tester/.latch/native-host.log",
+      "linux",
     ),
     "#!/bin/sh\n" +
       "printf '%s native host invoked\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> '/Users/tester/.latch/native-host.log'\n" +
@@ -87,4 +92,73 @@ test("macOS host directory targets the selected Chrome channel", () => {
       "NativeMessagingHosts",
     ),
   );
+});
+
+test("Windows has no NativeMessagingHosts folder to compute", () => {
+  assert.throws(
+    () => nativeMessagingDirectory({ browser: "chrome", platform: "win32", home: "C:\\Users\\tester" }),
+    /Registry/,
+  );
+});
+
+test("Windows native messaging hosts are registered through the registry, not a folder", () => {
+  assert.equal(
+    nativeMessagingRegistryKey("chrome"),
+    "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.local.latch",
+  );
+  assert.equal(
+    nativeMessagingRegistryKey("chrome-beta"),
+    "HKCU\\Software\\Google\\Chrome Beta\\NativeMessagingHosts\\com.local.latch",
+  );
+  assert.equal(
+    nativeMessagingRegistryKey("chromium"),
+    "HKCU\\Software\\Chromium\\NativeMessagingHosts\\com.local.latch",
+  );
+  assert.throws(() => nativeMessagingRegistryKey("firefox"), /Unsupported browser on Windows/);
+});
+
+test("the Windows launcher is a batch file pinning the Node executable", () => {
+  assert.equal(
+    createLauncher(
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\tester\\.latch\\runtime\\native-host.js",
+      "C:\\Users\\tester\\.latch\\native-host.log",
+      "win32",
+    ),
+    "@echo off\r\n" +
+      '>> "C:\\Users\\tester\\.latch\\native-host.log" echo %DATE% %TIME% native host invoked\r\n' +
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\tester\\.latch\\runtime\\native-host.js" %* 2>> "C:\\Users\\tester\\.latch\\native-host.log"\r\n',
+  );
+  assert.ok(nativeHostLauncherPath("win32").endsWith(".bat"));
+  assert.ok(!nativeHostLauncherPath("linux").endsWith(".bat"));
+});
+
+test("the Windows manifest lives in the bridge directory, not a browser-specific folder", () => {
+  const target = manifestPath({ browser: "chrome" }, "win32");
+  assert.equal(path.basename(target), "com.local.latch.json");
+  assert.equal(path.dirname(target), path.dirname(nativeHostLauncherPath("win32")));
+});
+
+test("a Windows dry run reports the registry key without touching the registry or disk", (context) => {
+  const testHome = fs.mkdtempSync(path.join(os.tmpdir(), "latch-win-install-"));
+  context.after(() => fs.rmSync(testHome, { recursive: true, force: true }));
+  const previous = process.env.LATCH_HOME;
+  process.env.LATCH_HOME = testHome;
+  try {
+    const result = install({
+      browser: "chrome",
+      dryRun: true,
+      extensionId,
+      uninstall: false,
+      platform: "win32",
+    });
+    assert.equal(result.action, "install");
+    assert.equal(result.registryKey, "HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com.local.latch");
+    assert.equal(result.manifest.allowed_origins[0], `chrome-extension://${extensionId}/`);
+    assert.equal(fs.existsSync(result.target), false, "dry run must not write the manifest");
+    assert.equal(fs.readdirSync(testHome).length, 0, "dry run must not touch the bridge directory");
+  } finally {
+    if (previous === undefined) delete process.env.LATCH_HOME;
+    else process.env.LATCH_HOME = previous;
+  }
 });

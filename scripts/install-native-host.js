@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 
+import { execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { bridgeDirectory, NATIVE_HOST_NAME } from "../server/bridge-path.js";
+import { bridgeDirectory, isWindows, NATIVE_HOST_NAME } from "../server/bridge-path.js";
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const nativeHostPath = path.join(projectRoot, "server", "native-host.js");
@@ -29,8 +30,9 @@ export function extensionIdFromManifest(manifestPath = extensionManifestPath) {
     .join("");
 }
 
-export function nativeHostLauncherPath() {
-  return path.join(bridgeDirectory(), "native-host-launcher");
+export function nativeHostLauncherPath(platform = process.platform) {
+  const name = isWindows(platform) ? "native-host-launcher.bat" : "native-host-launcher";
+  return path.join(bridgeDirectory(), name);
 }
 
 export function nativeHostLogPath() {
@@ -60,7 +62,25 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", `'"'"'`)}'`;
 }
 
-export function createLauncher(nodePath = process.execPath, hostPath = nativeHostPath, logPath = nativeHostLogPath()) {
+// cmd.exe has no single-quote escaping; wrapping every path in double quotes
+// is enough here because these paths are filesystem paths, never user input.
+function batQuote(value) {
+  return `"${value}"`;
+}
+
+export function createLauncher(
+  nodePath = process.execPath,
+  hostPath = nativeHostPath,
+  logPath = nativeHostLogPath(),
+  platform = process.platform,
+) {
+  if (isWindows(platform)) {
+    return (
+      `@echo off\r\n` +
+      `>> ${batQuote(logPath)} echo %DATE% %TIME% native host invoked\r\n` +
+      `${batQuote(nodePath)} ${batQuote(hostPath)} %* 2>> ${batQuote(logPath)}\r\n`
+    );
+  }
   return `#!/bin/sh\nprintf '%s native host invoked\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> ${shellQuote(logPath)}\nexec ${shellQuote(nodePath)} ${shellQuote(hostPath)} "$@" 2>> ${shellQuote(logPath)}\n`;
 }
 
@@ -121,7 +141,41 @@ export function nativeMessagingDirectory({ browser, platform = process.platform,
     return path.join(home, ".config", productDirectory, "NativeMessagingHosts");
   }
 
-  throw new Error("The installer currently supports macOS and Linux. Windows requires a registry entry.");
+  throw new Error("Windows has no NativeMessagingHosts folder; use nativeMessagingRegistryKey instead.");
+}
+
+/**
+ * Chrome discovers a native messaging host on Windows through a registry
+ * value rather than a well-known folder: HKCU\...\NativeMessagingHosts\<name>
+ * default value holds the path to the host manifest JSON file.
+ */
+export function nativeMessagingRegistryKey(browser, hostName = NATIVE_HOST_NAME) {
+  const registryRoots = {
+    chrome: "Google\\Chrome",
+    "chrome-beta": "Google\\Chrome Beta",
+    chromium: "Chromium",
+  };
+  const root = registryRoots[browser];
+  if (!root) {
+    throw new Error(`Unsupported browser on Windows: ${browser}`);
+  }
+  return `HKCU\\Software\\${root}\\NativeMessagingHosts\\${hostName}`;
+}
+
+function setRegistryValue(key, value) {
+  execFileSync("reg", ["add", key, "/ve", "/t", "REG_SZ", "/d", value, "/f"], { stdio: "ignore" });
+}
+
+function deleteRegistryValue(key) {
+  try {
+    execFileSync("reg", ["delete", key, "/f"], { stdio: "ignore" });
+  } catch (error) {
+    // reg.exe itself missing is a real problem; the key already being gone
+    // (its usual failure mode) is not, so uninstall stays idempotent.
+    if (error.code === "ENOENT") {
+      throw error;
+    }
+  }
 }
 
 export function createHostManifest(extensionId, hostPath = nativeHostPath) {
@@ -138,11 +192,58 @@ export function createHostManifest(extensionId, hostPath = nativeHostPath) {
   };
 }
 
-export function manifestPath(options) {
+export function manifestPath(options, platform = process.platform) {
+  // Windows has no per-browser NativeMessagingHosts folder; one manifest file
+  // in the bridge directory is registered per-browser via the registry instead.
+  if (isWindows(platform)) {
+    return path.join(bridgeDirectory(), `${NATIVE_HOST_NAME}.json`);
+  }
   return path.join(nativeMessagingDirectory(options), `${NATIVE_HOST_NAME}.json`);
 }
 
 export function install(options) {
+  const platform = options.platform ?? process.platform;
+  return isWindows(platform) ? installWindows(options) : installPosix(options);
+}
+
+function installWindows(options) {
+  const target = manifestPath(options, "win32");
+  const launcher = nativeHostLauncherPath("win32");
+  const registryKey = nativeMessagingRegistryKey(options.browser);
+
+  if (options.uninstall) {
+    if (options.dryRun) {
+      return { action: "uninstall", target, launcher, registryKey };
+    }
+    deleteRegistryValue(registryKey);
+    if (fs.existsSync(target)) {
+      fs.unlinkSync(target);
+    }
+    if (fs.existsSync(launcher)) {
+      fs.unlinkSync(launcher);
+    }
+    if (fs.existsSync(nativeHostRuntimeDirectory())) {
+      fs.rmSync(nativeHostRuntimeDirectory(), { recursive: true, force: true });
+    }
+    return { action: "uninstall", target, launcher, registryKey };
+  }
+
+  const manifest = createHostManifest(options.extensionId, launcher);
+  if (options.dryRun) {
+    return { action: "install", target, launcher, manifest, registryKey };
+  }
+
+  fs.mkdirSync(bridgeDirectory(), { recursive: true });
+  const installedHost = installNativeHostRuntime();
+  fs.writeFileSync(launcher, createLauncher(process.execPath, installedHost, nativeHostLogPath(), "win32"));
+
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, `${JSON.stringify(manifest, null, 2)}\n`);
+  setRegistryValue(registryKey, target);
+  return { action: "install", target, manifest, registryKey };
+}
+
+function installPosix(options) {
   const target = manifestPath(options);
   const launcher = nativeHostLauncherPath();
   if (options.uninstall) {
